@@ -1,6 +1,6 @@
 """Transmission and reflection of a square lattice of a hole."""
 import grcwa
-import numpy as np
+import torch
 
 # Truncation order (actual number might be smaller)
 nG = 301
@@ -12,7 +12,7 @@ freq = 1.
 theta = 0.
 phi = 0.
 # to avoid singular matrix, alternatively, one can add fictitious small loss to vacuum
-Qabs = np.inf
+Qabs = float('inf')
 freqcmp = freq*(1+1j/2/Qabs)
 # the patterned layer has a griding: Nx*Ny
 Nx = 400
@@ -30,10 +30,10 @@ thickN = 1.
 
 # eps for patterned layer
 radius = 0.3
-epgrid = np.ones((Nx,Ny),dtype=float)*epp
-x0 = np.linspace(0,1.,Nx)
-y0 = np.linspace(0,1.,Ny)
-x, y = np.meshgrid(x0,y0,indexing='ij')
+epgrid = torch.ones((Nx,Ny),dtype=torch.float64)*epp
+x0 = torch.linspace(0,1.,Nx,dtype=torch.float64)
+y0 = torch.linspace(0,1.,Ny,dtype=torch.float64)
+x, y = torch.meshgrid(x0,y0,indexing='ij')
 sphere = (x-.5)**2+(y-.5)**2<radius**2
 epgrid[sphere] = epbkg
 

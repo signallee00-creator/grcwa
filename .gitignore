@@ -104,3 +104,6 @@ ENV/
 
 # IDE settings
 .vscode/
+
+# Local benchmarking / comparison snapshots
+snapshot_original_numpy_autograd_20260329/

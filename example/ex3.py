@@ -2,11 +2,8 @@
 """ Nlopt is needed """
 
 import grcwa
-grcwa.set_backend('autograd')  # important!!
-
 import numpy as npf
-import autograd.numpy as np
-from autograd import grad
+import torch
 
 try:
     import nlopt
@@ -48,7 +45,8 @@ planewave={'p_amp':1,'s_amp':0,'p_phase':0,'s_phase':0}
 # It also be used to resolve the singular matrix issues by setting a large but finite Qabs, e.g. Qabs = 1e5
 
 def fun_reflection(x,Qabs):
-    freqcmp = freq*(1+1j/2/Qabs)
+    freqcmp = complex(freq*(1+1j/2/Qabs))
+    x = torch.as_tensor(x,dtype=torch.float64)
     ######### setting up RCWA
     obj = grcwa.obj(nG,L1,L2,freqcmp,theta,phi,verbose=0)
     # input layer information
@@ -65,23 +63,24 @@ def fun_reflection(x,Qabs):
 
 # nlopt function
 ctrl = 0
-Qabs = np.inf
+Qabs = npf.inf
 fun = lambda x: fun_reflection(x,Qabs)
-grad_fun = grad(fun)
 def fun_nlopt(x,gradn):
     global ctrl
-    gradn[:] = grad_fun(x)
-    y = fun(x)
+    x_t = torch.tensor(x,dtype=torch.float64,requires_grad=True)
+    y = fun(x_t)
+    (grad_t,) = torch.autograd.grad(y, x_t)
+    gradn[:] = grad_t.detach().cpu().numpy()
     
     print('Step = ',ctrl,', R = ',y)
     ctrl += 1
-    return fun(x)
+    return float(y.detach())
 
 # set up NLOPT
 ndof = Nx*Ny
-init = epbkg+ (epp-epbkg)*np.random.random(ndof)
-lb=np.ones(ndof,dtype=float)*epbkg
-ub=np.ones(ndof,dtype=float)*epp
+init = epbkg+ (epp-epbkg)*npf.random.random(ndof)
+lb=npf.ones(ndof,dtype=float)*epbkg
+ub=npf.ones(ndof,dtype=float)*epp
 
 opt = nlopt.opt(nlopt.LD_MMA, ndof)
 opt.set_lower_bounds(lb)

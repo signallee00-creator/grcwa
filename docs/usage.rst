@@ -5,14 +5,13 @@ Usage
 To use grcwa in a project::
 
     import grcwa
-
-To enable autograd::
-
-  grcwa.set_backend('autograd')
+    import torch
 
 To initialize the RCWA::
 
-  obj = grcwa.obj(nG,L1,L2,freq,theta,phi,verbose=0) # verbose=1 for output the actual nG
+  obj = grcwa.obj(nG,L1,L2,freq,theta,phi,verbose=0,
+                  dtype_f=torch.float64,dtype_c=torch.complex128)
+  # verbose=1 prints the actual nG
 
 To add layers, the order of adding will determine the layer order (1st added layer is 0-th layer, 2nd to be 1st layer, and so forth)::
   
@@ -27,7 +26,7 @@ To feed the epsilon profile for patterned layer::
   # x is a 1D array: np.concatenate((epgrid1.flatten(),epgrid2.flatten(),...))
   obj.GridLayer_geteps(x)
 
-To scale the periodicity in the both lateral directions simultaneously (as an autogradable parameter)::
+To scale the periodicity in both lateral directions simultaneously (as a differentiable parameter)::
 
   obj.Init_Setup(Pscale=scale) # period will be scale*Lx and scale*Ly
 

@@ -3,7 +3,7 @@ Welcome to grcwa's documentation!
 
 grcwa (autoGradable RCWA) is a python implementation of rigorous
 coupled wave analysis (RCWA) for arbitrarily shaped photonic crystal
-slabs, supporting automatic differentation with autograd
+slabs, supporting automatic differentiation with PyTorch
 
 Citing
 -------
@@ -36,10 +36,10 @@ directions, and invariant along the vertical direction.
 
 * Each photonic crystal layer can have arbitrary dielectric profile on
   the *2D* grids.
-* **autograd** is integrated into the package, allowing for automated
-  and fast gradient evaluations for the sake of large-scale
-  optimizations. Autogradable parameters include dielectric constant on
-  every grid, frequency, angles, thickness of each layer, and
+* **PyTorch autograd** is integrated into the package, allowing for
+  automated and fast gradient evaluations for the sake of large-scale
+  optimizations. Differentiable parameters include dielectric constant
+  on every grid, frequency, angles, thickness of each layer, and
   periodicity (however the ratio of periodicity along the two lateral
   directions must be fixed).
   

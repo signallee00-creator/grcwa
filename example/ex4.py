@@ -1,19 +1,19 @@
 """Transmission and reflection of a hexagonal lattice of a hole."""
 import grcwa
-import numpy as np
+import torch
 
 # Truncation order (actual number might be smaller)
 nG = 101
 # lattice constants
-angle = np.pi/3;
+angle = torch.pi/3
 L1 = [0.1,0]
-L2 = [0.1*np.cos(angle),0.1*np.sin(angle)]
+L2 = [0.1*torch.cos(torch.tensor(angle)).item(),0.1*torch.sin(torch.tensor(angle)).item()]
 # frequency and angles
 freq = 1.
 theta = 0.
 phi = 0.
 # to avoid singular matrix, alternatively, one can add fictitious small loss to vacuum
-Qabs = np.inf
+Qabs = float('inf')
 freqcmp = freq*(1+1j/2/Qabs)
 # the patterned layer has a griding: Nx*Ny
 Nx = 1000
@@ -30,24 +30,24 @@ thickp = 0.4 # thickness of patterned layer
 thickN = 1.
 
 # eps for patterned layer
-epgrid = np.ones((Nx,Ny),dtype=float)*epp
+epgrid = torch.ones((Nx,Ny),dtype=torch.float64)*epp
 
 ## note the eps-matrix is defined in the non-orthogonal coordinate given by basis vectors. To define a sphere, we need to obtain the Cartesian coordinate, as shown below,
 
 # coordinate in the non-orthogonal coordinate
-u0 = np.linspace(0,1.,Nx)
-v0 = np.linspace(0,1.,Ny)
-u, v = np.meshgrid(u0,v0,indexing='ij')
+u0 = torch.linspace(0,1.,Nx,dtype=torch.float64)
+v0 = torch.linspace(0,1.,Ny,dtype=torch.float64)
+u, v = torch.meshgrid(u0,v0,indexing='ij')
 
 radius = 0.3
 uc0 = 0.5 # center of sphere
 vc0 = 0.5
 # to define the sphere, let's transform to Cartesian coordinate
-x = u + v * np.cos(angle)
-y = v * np.sin(angle)
+x = u + v * torch.cos(torch.tensor(angle))
+y = v * torch.sin(torch.tensor(angle))
 
-xc0 = uc0 + vc0 * np.cos(angle)
-yc0 = vc0 * np.sin(angle)
+xc0 = uc0 + vc0 * torch.cos(torch.tensor(angle))
+yc0 = vc0 * torch.sin(torch.tensor(angle))
 
 sphere = (x-xc0)**2+(y-yc0)**2<radius**2
 epgrid[sphere] = epbkg

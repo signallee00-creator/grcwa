@@ -28,8 +28,7 @@ Tutorial
     .. code-block:: python
 		  
 		    import grcwa
-		    import numpy as np
-		    grcwa.set_backend('autograd') # if autograd needed
+		    import torch
 		    
 		     # lattice constants
 		     L1 = [0.2,0]
@@ -39,11 +38,12 @@ Tutorial
 		     # frequency
 		     freq = 1.
 		     # angle
-		     theta = np.pi/10
+		     theta = torch.pi/10
 		     phi = 0.
 
 		     # setup RCWA
-		     obj = grcwa.obj(nG,L1,L2,freq,theta,phi,verbose=1)		    
+		     obj = grcwa.obj(nG,L1,L2,freq,theta,phi,verbose=1,
+		                     dtype_f=torch.float64,dtype_c=torch.complex128)
 
   * Geometry: the thicknesses of the four layers are 0.1,0.2,0.3, and 0.4. For patterned layers, we consider total grid points *N*\ :sub:`x` \* *N*\ :sub:`y` = 100\*100 within the unit cell.
     
@@ -81,22 +81,22 @@ Tutorial
 		    epbkg = 1.
 
 		    # coordinate
-		    x0 = np.linspace(0,1.,Nx)
-		    y0 = np.linspace(0,1.,Ny)
-		    x, y = np.meshgrid(x0,y0,indexing='ij')
+		    x0 = torch.linspace(0,1.,Nx,dtype=torch.float64)
+		    y0 = torch.linspace(0,1.,Ny,dtype=torch.float64)
+		    x, y = torch.meshgrid(x0,y0,indexing='ij')
 
 		    # layer 1
-		    epgrid1 = np.ones((Nx,Ny))*ep1
+		    epgrid1 = torch.ones((Nx,Ny),dtype=torch.float64)*ep1
 		    ind = (x-.5)**2+(y-.5)**2<radius**2
 		    epgrid1[ind]=epbkg
 
 		    # layer 2
-		    epgrid2 = np.ones((Nx,Ny))*ep2
-		    ind = np.logical_and(np.abs(x-.5)<a/2 and np.abs(y-.5)<a/2))
+		    epgrid2 = torch.ones((Nx,Ny),dtype=torch.float64)*ep2
+		    ind = torch.logical_and(torch.abs(x-.5)<a/2, torch.abs(y-.5)<a/2)
 		    epgrid2[ind]=epbkg		    
 		    
 		    # combine epsilon of all layers
-		    epgrid = np.concatenate((epgrid1.flatten(),epgrid2.flatten()))
+		    epgrid = torch.concatenate((epgrid1.flatten(),epgrid2.flatten()))
 		    obj.GridLayer_geteps(epgrid)
 
   * Incident light is *s*-polarized
