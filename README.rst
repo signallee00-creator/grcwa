@@ -18,6 +18,11 @@ slabs, supporting automatic differentiation with PyTorch
 
 * Free software: GPL license
 * Documentation: https://grcwa.readthedocs.io.
+* Quick docs in this repo:
+  * English overview: `USAGE.md <./USAGE.md>`_
+  * Korean overview: `README.ko.md <./README.ko.md>`_
+  * Korean usage guide: `사용법.md <./사용법.md>`_
+  * Update log: `update.md <./update.md>`_ / `update.ko.md <./update.ko.md>`_
 
 Citing
 -------
@@ -57,6 +62,9 @@ directions, and invariant along the vertical direction.
   on every grid, frequency, angles, thickness of each layer, and
   periodicity (however the ratio of periodicity along the two lateral
   directions must be fixed).
+* Cached scattering/amplitude sweeps and selective field reconstruction
+  reduce repeated work for multi-layer queries, line cuts, and
+  partial single-layer updates.
 
 
 Quick Start
@@ -172,6 +180,76 @@ Quick Start
 * Example 3: topology optimization of reflection of a single patterned layer, `ex3.py <./example/ex3.py>`_
 
 * Example 4: transmission and reflection (sum or by order) of a hexagonal lattice of a hole: `ex4.py <./example/ex4.py>`_
+
+* Example 5: cache-aware field reconstruction, line cuts, and state reuse: `ex5_cache_and_fields.py <./example/ex5_cache_and_fields.py>`_
+
+Fast-path notes
+---------------
+
+* For repeated field queries, build caches once and reuse them::
+
+    obj.BuildSMatrixCache()
+    obj.BuildAmplitudeCache()
+
+  If memory becomes the main constraint after amplitudes are built, drop
+  the heavy S-matrix sweep and keep only the lightweight amplitude and
+  exterior caches::
+
+    obj.ClearSMatrixCache()
+
+* Reconstruct only what you need::
+
+    field_xy = obj.Solve_FieldXY(which_layer, z_list,
+                                 components=('Ex',),
+                                 derived=('E2norm',))
+
+* Use dedicated line-cut APIs instead of reconstructing full 2D fields
+  when you only need *XZ* or *YZ* views::
+
+    field_xz = obj.Solve_FieldXZ(y0=0.0, znum=4,
+                                 components=('Ex',))
+    field_xz_fine = obj.Solve_FieldXZ(y0=0.0, znum=3, z_step=0.01,
+                                      components=('Ex',))
+
+  `Solve_FieldXZ` and `Solve_FieldYZ` return whole-structure cuts. For a
+  single-layer line cut, use `Solve_FieldXZLayer` or `Solve_FieldYZLayer`.
+  Integer ``znum`` means the minimum samples per layer; thicker layers are
+  sampled on the same approximate ``z_step`` mesh. Pass ``z_step`` explicitly
+  when you want to control the structure-wide spacing directly.
+
+  To post-process absorption from user-supplied Im(eps) patterns::
+
+    abs_layer = obj.Solve_AbsorptionLayer(which_layer, imag_eps_grid, min_znum=5)
+    abs_z = obj.Solve_AbsorptionLayerZ(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
+    abs_xy = obj.Solve_AbsorptionLayerXY(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
+    abs_all = obj.Solve_Absorption({1: imag_eps_grid1, 3: imag_eps_grid2}, min_znum=5)
+
+* Replace a single grid layer and update only the affected scattering cache::
+
+    obj.GridLayer_updateeps(which_layer, new_ep_grid, update_cache=False)
+    obj.UpdateSMatrixCache()
+
+* Save a baseline object for repeated what-if runs::
+
+    obj.SaveState('baseline.pt', include_caches=False)
+    restored = grcwa.obj.LoadState('baseline.pt')
+
+  To save a lighter cached state for repeated field solves, keep the
+  amplitude/exterior cache and drop the S-matrix sweep before saving::
+
+    obj.BuildSMatrixCache()
+    obj.BuildAmplitudeCache()
+    obj.ClearSMatrixCache()
+    obj.SaveState('baseline_light.pt', include_caches=True)
+
+  For iterative design loops, the practical pattern is often::
+
+    obj.BuildSMatrixCache()
+    obj.BuildAmplitudeCache()
+    obj.ClearSMatrixCache()
+
+  This keeps field queries fast while releasing the large prefix/suffix
+  S-matrix cache.
   
 Note on conventions
 -------------------

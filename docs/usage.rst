@@ -2,6 +2,13 @@
 Usage
 =====
 
+Repository quick guides:
+
+- English Markdown guide: ``USAGE.md``
+- Korean overview: ``README.ko.md``
+- Korean usage guide: ``사용법.md``
+- Update log: ``update.md`` / ``update.ko.md``
+
 To use grcwa in a project::
 
     import grcwa
@@ -25,6 +32,11 @@ To feed the epsilon profile for patterned layer::
 
   # x is a 1D array: np.concatenate((epgrid1.flatten(),epgrid2.flatten(),...))
   obj.GridLayer_geteps(x)
+
+To update only one grid-patterned layer without rebuilding every patterned layer::
+
+  obj.GridLayer_updateeps(which_layer, ep_grid, update_cache=False)
+  obj.UpdateSMatrixCache()
 
 To scale the periodicity in both lateral directions simultaneously (as a differentiable parameter)::
 
@@ -55,6 +67,12 @@ To get amplitude of eigenvectors at some layer at some zoffset ::
 
   ai,bi = obj.GetAmplitudes(which_layer,z_offset)
 
+To reuse structure and excitation data across many solves::
+
+  obj.BuildSMatrixCache()
+  obj.BuildAmplitudeCache()
+  obj.ClearSMatrixCache() # optional: drop heavy prefix/suffix matrices and keep lightweight amplitude/exterior caches
+
 
 To get real-space epsilon profile reconstructured from the truncated Fourier orders ::
   
@@ -66,7 +84,39 @@ To get Fourier amplitude of fields at some layer at some zoffset ::
 
 To get fields in real space on grid points ::
   
-  E,H = obj.Solve_FieldOnGrid(which_layer,z_offset) # #E = [Ex,Ey,Ez], H = [Hx,Hy,Hz]
+  E,H = obj.Solve_FieldOnGrid(which_layer,z_offset) # E = [Ex,Ey,Ez], H = [Hx,Hy,Hz]
+  E,H = obj.Solve_FieldOnGrid(which_layer,z_offset,components=('Ex','Hy'))
+
+To get dict-based field outputs and reconstruct only the requested components::
+
+  xy = obj.Solve_FieldXY(which_layer,z_offset,components=('Ex','Hy'),derived=('Pz','E2norm'))
+  xz = obj.Solve_FieldXZ(y0=0.0,znum=4,components=('Ex',))
+  yz = obj.Solve_FieldYZ(x0=0.0,znum=4,components=('Ex',))
+  xz_fine = obj.Solve_FieldXZ(y0=0.0,znum=3,z_step=0.01,components=('Ex',))
+  xz_layer = obj.Solve_FieldXZLayer(which_layer,z_list,y0=0.0,components=('Ex',))
+
+  # xy['E2norm'] = |Ex|^2 + |Ey|^2 + |Ez|^2
+  # xy['Pz'] uses 0.5*Re(E x conj(H))
+  # xz/yz return structure-wide cuts with x_coords/y_coords, z_coords, layer_ranges, and layer_edges
+  # integer znum means the minimum samples per layer; thicker layers use the same approximate z_step mesh
+  # z_step can be passed explicitly for structure-wide xz/yz cuts
+  # automatic x/y coordinates are only provided for axis-aligned orthogonal lattices
+
+To save and restore a baseline object state::
+
+  state = obj.ExportState(include_caches=False)
+  obj.SaveState('baseline.pt', include_caches=False)
+  restored = grcwa.obj.LoadState('baseline.pt')
+
+  # for a lightweight cached state, build amplitudes first and then drop the heavy S-matrix cache
+  obj.BuildSMatrixCache()
+  obj.BuildAmplitudeCache()
+  obj.ClearSMatrixCache()
+  obj.SaveState('baseline_light.pt', include_caches=True)
+
+For repeated z-scans, pass the whole z list in one call instead of looping Solve_FieldOnGrid externally::
+
+  field = obj.Solve_FieldXY(which_layer,z_list,components=('Ex',))
   
 To get volume integration with respect to some convolution matrix *M* defined for 3 directions, respectively::
   
@@ -75,3 +125,15 @@ To get volume integration with respect to some convolution matrix *M* defined fo
 To compute Maxwell stress tensor, integrated over the *z*-plane::
 
   Tx,Ty,Tz = obj.Solve_ZStressTensorIntegral(which_layer)
+
+To estimate absorption from user-supplied Im(eps) patterns in real space::
+
+  abs_layer = obj.Solve_AbsorptionLayer(which_layer, imag_eps_grid, min_znum=5)
+  abs_z = obj.Solve_AbsorptionLayerZ(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
+  abs_xy = obj.Solve_AbsorptionLayerXY(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
+  abs_all = obj.Solve_Absorption({1: imag_eps_grid1, 3: imag_eps_grid2}, min_znum=5)
+
+  # imag_eps_grid can be an arbitrary Nx x Ny tensor for isotropic loss
+  # or a length-3 tuple/list of Nx x Ny tensors for diagonal anisotropic loss
+  # one layer can also receive multiple named patterns as a dict, e.g. {'core': grid1, 'clad': grid2}
+  # Solve_AbsorptionLayerZ returns absorption_z, Solve_AbsorptionLayerXY returns absorption_xy
