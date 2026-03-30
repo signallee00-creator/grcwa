@@ -9,7 +9,7 @@ from .fft_funs import (
     get_ifft_yline,
     get_ifft_yline_batch,
 )
-from .kbloch import Lattice_Reciprocate,Lattice_getG,Lattice_SetKs
+from .kbloch import Lattice_Reciprocate, Lattice_getG, Lattice_SetKs
 from .rcwa import obj
 
 __author__ = """Weiliang Jin"""

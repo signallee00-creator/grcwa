@@ -1,24 +1,10 @@
 import copy
+import numbers
 
 import torch
 
-from .fft_funs import Epsilon_fft, get_conv, get_ifft
-from ._field_helpers import (
-    CORE_FIELD_NAMES,
-    E_FIELD_NAMES,
-    H_FIELD_NAMES,
-    normalize_field_requests,
-)
-from ._field_views import (
-    build_spatial_output,
-    build_layer_z_points,
-    build_structure_z_segments,
-    coerce_structure_line_coords,
-    field_coefficients_batched,
-    line_reduced_coords,
-    reconstruct_line_core_fields,
-    reconstruct_xy_core_fields,
-)
+from .fft_funs import Epsilon_fft, get_ifft
+from .fft_funs import get_ifft_batch, get_ifft_xline_batch, get_ifft_yline_batch
 from .kbloch import Lattice_Reciprocate, Lattice_getG, Lattice_SetKs
 STATE_VERSION = 1
 
@@ -56,6 +42,168 @@ def _coerce_grid_eps(ep_grid, Nx, Ny, dtype_f, device):
     if tensor.numel() != Nx * Ny:
         raise ValueError('Epsilon grid must have Nx*Ny entries')
     return tensor.reshape(Nx, Ny)
+
+
+def field_coefficients_batched(obj, which_layer, z_offset):
+    """Return stacked Fourier coefficients for Ex,Ey,Ez,Hx,Hy,Hz."""
+    which_layer = obj._validate_layer_index(which_layer)
+    z_tensor = torch.as_tensor(z_offset, dtype=obj.dtype_f, device=obj.device)
+    scalar_input = z_tensor.ndim == 0
+    if scalar_input:
+        z_tensor = z_tensor.reshape(1)
+    ai0, bi0 = obj.GetAmplitudes_noTranslate(which_layer)
+
+    q = obj.q_list[which_layer]
+    phi = obj.phi_list[which_layer]
+    kp = obj.kp_list[which_layer]
+    thickness = torch.as_tensor(obj.thickness_list[which_layer], dtype=obj.dtype_f, device=obj.device)
+
+    dz = z_tensor.reshape(-1, 1)
+    q_row = q.reshape(1, -1)
+    ai = ai0.reshape(1, -1) * torch.exp(1j * q_row * dz)
+    bi = bi0.reshape(1, -1) * torch.exp(1j * q_row * (thickness - dz))
+
+    fhxy = torch.matmul(ai + bi, torch.transpose(phi, 0, 1))
+    fhx = fhxy[:, :obj.nG]
+    fhy = fhxy[:, obj.nG:]
+
+    tmp1 = (ai - bi) / (obj.omega * q_row)
+    tmp2 = torch.matmul(tmp1, torch.transpose(phi, 0, 1))
+    fexy = torch.matmul(tmp2, torch.transpose(kp, 0, 1))
+    fey = -fexy[:, :obj.nG]
+    fex = fexy[:, obj.nG:]
+
+    fhz = (obj.kx.reshape(1, -1) * fey - obj.ky.reshape(1, -1) * fex) / obj.omega
+    fez = (obj.ky.reshape(1, -1) * fhx - obj.kx.reshape(1, -1) * fhy) / obj.omega
+    if obj.id_list[which_layer][0] == 0:
+        fez = fez / obj.Uniform_ep_list[obj.id_list[which_layer][2]]
+    else:
+        epinv = obj.Patterned_epinv_list[obj.id_list[which_layer][2]]
+        fez = torch.matmul(fez, torch.transpose(epinv, 0, 1))
+
+    coeffs = torch.stack((fex, fey, fez, fhx, fhy, fhz), dim=1)
+    return coeffs, scalar_input
+
+
+def get_line_coordinates(obj, axis, coords, fixed_coord, which_layer=None):
+    """
+    Return physical coordinates and reduced coordinates for line cuts.
+
+    If ``which_layer`` is given, the default coordinate count follows that
+    layer's grid shape. Otherwise a structure-wide default count is used.
+    """
+    length_x = torch.linalg.norm(obj.L1)
+    length_y = torch.linalg.norm(obj.L2)
+
+    if coords is None:
+        if not obj._layer_is_axis_aligned():
+            raise ValueError('Auto-generated x/y coordinates are only available for axis-aligned orthogonal lattices')
+
+        if which_layer is not None:
+            Nx, Ny = obj._default_grid_shape(which_layer)
+            count = Nx if axis == 'x' else Ny
+        elif axis == 'x':
+            count = max(shape[0] for shape in obj.GridLayer_Nxy_list) if obj.GridLayer_Nxy_list else max(obj.nG, 64)
+        else:
+            count = max(shape[1] for shape in obj.GridLayer_Nxy_list) if obj.GridLayer_Nxy_list else max(obj.nG, 64)
+
+        if axis == 'x':
+            coords = torch.arange(count, dtype=obj.dtype_f, device=obj.device) / count * obj.L1[0]
+        else:
+            coords = torch.arange(count, dtype=obj.dtype_f, device=obj.device) / count * obj.L2[1]
+
+    coords = torch.as_tensor(coords, dtype=obj.dtype_f, device=obj.device)
+    fixed_coord = torch.as_tensor(fixed_coord, dtype=obj.dtype_f, device=obj.device)
+    if axis == 'x':
+        return coords, coords / length_x, fixed_coord / length_y
+    return coords, coords / length_y, fixed_coord / length_x
+
+
+def build_layer_z_points(obj, thickness, count=None, z_step=None):
+    thickness = torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device)
+
+    if z_step is None:
+        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
+
+    if thickness.item() == 0.0:
+        return torch.zeros((count,), dtype=obj.dtype_f, device=obj.device)
+
+    if thickness.item() <= z_step * (count - 1):
+        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
+
+    local_z = torch.arange(0.0, float(thickness.item()), z_step, dtype=obj.dtype_f, device=obj.device)
+    if local_z.numel() == 0 or not torch.isclose(local_z[0], thickness.new_zeros(())):
+        local_z = thickness.new_zeros((1,))
+
+    if not torch.isclose(local_z[-1], thickness):
+        local_z = torch.concatenate((local_z, thickness.reshape(1)))
+
+    if local_z.numel() < count:
+        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
+
+    return local_z
+
+
+def build_structure_z_segments(obj, znum=32, z_step=None, duplicate_interfaces=True):
+    if torch.is_tensor(znum):
+        znum = znum.tolist()
+
+    if isinstance(znum, numbers.Integral):
+        min_znum = max(int(znum), 2)
+        if z_step is None:
+            positive_thicknesses = []
+            for thickness in obj.thickness_list:
+                thickness_value = float(torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device).item())
+                if thickness_value > 0.0:
+                    positive_thicknesses.append(thickness_value)
+            if positive_thicknesses and min_znum > 1:
+                mesh_z_step = min(positive_thicknesses) / (min_znum - 1)
+            else:
+                mesh_z_step = None
+            z_counts = None
+        else:
+            mesh_z_step = float(torch.as_tensor(z_step, dtype=obj.dtype_f, device=obj.device).item())
+            if mesh_z_step <= 0.0:
+                raise ValueError('z_step must be positive')
+            z_counts = None
+    else:
+        if z_step is not None:
+            raise ValueError('z_step cannot be combined with a per-layer znum sequence')
+        z_counts = [max(int(value), 2) for value in znum]
+        if len(z_counts) != obj.Layer_N:
+            raise ValueError('znum sequence must have one entry per layer')
+        min_znum = None
+        mesh_z_step = None
+
+    z_pieces = []
+    segments = []
+    layer_ranges = []
+    layer_edges = [torch.zeros((), dtype=obj.dtype_f, device=obj.device)]
+    z_offset = torch.zeros((), dtype=obj.dtype_f, device=obj.device)
+    cursor = 0
+
+    for layer_index, thickness in enumerate(obj.thickness_list):
+        thickness = torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device)
+        if z_counts is None:
+            local_z = build_layer_z_points(obj, thickness, count=min_znum, z_step=mesh_z_step)
+        else:
+            local_z = build_layer_z_points(obj, thickness, count=z_counts[layer_index], z_step=None)
+
+        global_z = z_offset + local_z
+        if layer_index > 0 and not duplicate_interfaces:
+            local_z = local_z[1:]
+            global_z = global_z[1:]
+
+        start = cursor
+        stop = cursor + local_z.numel()
+        layer_ranges.append((start, stop))
+        segments.append((layer_index, local_z))
+        z_pieces.append(global_z)
+        cursor = stop
+        z_offset = z_offset + thickness
+        layer_edges.append(z_offset)
+
+    return torch.concatenate(z_pieces), segments, layer_ranges, torch.stack(layer_edges), mesh_z_step
 
 
 # S-matrix assembly helpers
@@ -305,17 +453,11 @@ class obj:
             and torch.isclose(self.L2[0], zero, atol=atol, rtol=0.0)
         )
 
-    def _basis_lengths(self):
-        return torch.linalg.norm(self.L1), torch.linalg.norm(self.L2)
-
     def _default_grid_shape(self, which_layer):
         which_layer = self._validate_layer_index(which_layer)
         if self.id_list[which_layer][0] != 1:
             raise ValueError('Nxy must be provided for non-grid layers')
         return self.GridLayer_Nxy_list[self.id_list[which_layer][3]]
-
-    def _get_step_smatrix(self, l):
-        return make_step_smatrix(l, self.q_list, self.phi_list, self.kp_list, self.thickness_list, dtype_c=self.dtype_c)
 
     def _ensure_smatrix_cache_current(self):
         self._ensure_setup_ready()
@@ -552,11 +694,13 @@ class obj:
 
         self._prefix_smat[0] = identity_smatrix(nG2, self.dtype_c, self.device)
         for i in range(1, self.Layer_N):
-            self._prefix_smat[i] = compose_smatrix(self._prefix_smat[i - 1], self._get_step_smatrix(i - 1))
+            step_smat = make_step_smatrix(i - 1, self.q_list, self.phi_list, self.kp_list, self.thickness_list, dtype_c=self.dtype_c)
+            self._prefix_smat[i] = compose_smatrix(self._prefix_smat[i - 1], step_smat)
 
         self._suffix_smat[self.Layer_N - 1] = identity_smatrix(nG2, self.dtype_c, self.device)
         for i in range(self.Layer_N - 2, -1, -1):
-            self._suffix_smat[i] = compose_smatrix(self._get_step_smatrix(i), self._suffix_smat[i + 1])
+            step_smat = make_step_smatrix(i, self.q_list, self.phi_list, self.kp_list, self.thickness_list, dtype_c=self.dtype_c)
+            self._suffix_smat[i] = compose_smatrix(step_smat, self._suffix_smat[i + 1])
 
         self._smat_cache_ready = True
         self._dirty_layers = set()
@@ -590,11 +734,13 @@ class obj:
 
         prefix_start = min(affected_steps) + 1
         for i in range(prefix_start, self.Layer_N):
-            self._prefix_smat[i] = compose_smatrix(self._prefix_smat[i - 1], self._get_step_smatrix(i - 1))
+            step_smat = make_step_smatrix(i - 1, self.q_list, self.phi_list, self.kp_list, self.thickness_list, dtype_c=self.dtype_c)
+            self._prefix_smat[i] = compose_smatrix(self._prefix_smat[i - 1], step_smat)
 
         suffix_start = max(affected_steps)
         for i in range(suffix_start, -1, -1):
-            self._suffix_smat[i] = compose_smatrix(self._get_step_smatrix(i), self._suffix_smat[i + 1])
+            step_smat = make_step_smatrix(i, self.q_list, self.phi_list, self.kp_list, self.thickness_list, dtype_c=self.dtype_c)
+            self._suffix_smat[i] = compose_smatrix(step_smat, self._suffix_smat[i + 1])
 
         self._dirty_layers.difference_update(changed_layers)
         self._smat_cache_ready = True
@@ -687,58 +833,159 @@ class obj:
             ])
         return out
 
-    def Solve_FieldOnGrid(self, which_layer, z_offset, Nxy=None, components=CORE_FIELD_NAMES):
-        requested_core, _, required_core = normalize_field_requests(components, ())
+    def Solve_FieldOnGrid(self, which_layer, z_offset, Nxy=None, components=None):
+        if components is None:
+            components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+
+        all_components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+        requested_core = []
+        for name in components:
+            if name not in all_components:
+                raise ValueError(f'Unknown field component: {name}')
+            if name not in requested_core:
+                requested_core.append(name)
+
         if Nxy is None:
             Nxy = self._default_grid_shape(which_layer)
         Nx, Ny = Nxy[0], Nxy[1]
 
         coeffs, scalar_input = field_coefficients_batched(self, which_layer, z_offset)
-        core_fields = reconstruct_xy_core_fields(self, coeffs, Nx, Ny, required_core)
+        indices = [all_components.index(name) for name in requested_core]
+
+        spatial = get_ifft_batch(Nx, Ny, coeffs[:, indices, :], self.G, dtype_c=self.dtype_c, device=self.device)
+        core_fields = {name: spatial[:, idx] for idx, name in enumerate(requested_core)}
 
         legacy = []
         for z_index in range(coeffs.shape[0]):
-            E = [None, None, None]
-            H = [None, None, None]
-            for idx, name in enumerate(E_FIELD_NAMES):
-                if name in requested_core:
-                    E[idx] = core_fields[name][z_index]
-            for idx, name in enumerate(H_FIELD_NAMES):
-                if name in requested_core:
-                    H[idx] = core_fields[name][z_index]
+            Ex = core_fields['Ex'][z_index] if 'Ex' in core_fields else None
+            Ey = core_fields['Ey'][z_index] if 'Ey' in core_fields else None
+            Ez = core_fields['Ez'][z_index] if 'Ez' in core_fields else None
+            Hx = core_fields['Hx'][z_index] if 'Hx' in core_fields else None
+            Hy = core_fields['Hy'][z_index] if 'Hy' in core_fields else None
+            Hz = core_fields['Hz'][z_index] if 'Hz' in core_fields else None
+            E = [Ex, Ey, Ez]
+            H = [Hx, Hy, Hz]
+            if Ex is None and Ey is None and Ez is None:
+                E = None
+            if Hx is None and Hy is None and Hz is None:
+                H = None
             legacy.append([E, H])
 
         if scalar_input:
             return legacy[0]
         return legacy
 
-    def Solve_FieldXY(self, which_layer, z_offset, Nxy=None, components=('Ex', 'Ey', 'Ez'), derived=()):
-        requested_core, requested_derived, required_core = normalize_field_requests(components, derived)
+    def Solve_FieldXY(self, which_layer, z_offset, Nxy=None, components=('Ex', 'Ey', 'Ez')):
+        all_components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+        requested_core = []
+        for name in components:
+            if name not in all_components:
+                raise ValueError(f'Unknown field component: {name}')
+            if name not in requested_core:
+                requested_core.append(name)
+
         if Nxy is None:
             Nxy = self._default_grid_shape(which_layer)
         Nx, Ny = Nxy[0], Nxy[1]
 
         coeffs, scalar_input = field_coefficients_batched(self, which_layer, z_offset)
-        core_fields = reconstruct_xy_core_fields(self, coeffs, Nx, Ny, required_core)
-        return build_spatial_output(core_fields, requested_core, requested_derived, scalar_input)
+        indices = [all_components.index(name) for name in requested_core]
 
-    def Solve_FieldXZLayer(self, which_layer, z_list, y0=0.0, x_coords=None, components=('Ex',), derived=()):
-        requested_core, requested_derived, required_core = normalize_field_requests(components, derived)
+        spatial = get_ifft_batch(Nx, Ny, coeffs[:, indices, :], self.G, dtype_c=self.dtype_c, device=self.device)
+        core_fields = {name: spatial[:, idx] for idx, name in enumerate(requested_core)}
+
+        Ex = core_fields['Ex'][0] if scalar_input and 'Ex' in core_fields else core_fields.get('Ex')
+        Ey = core_fields['Ey'][0] if scalar_input and 'Ey' in core_fields else core_fields.get('Ey')
+        Ez = core_fields['Ez'][0] if scalar_input and 'Ez' in core_fields else core_fields.get('Ez')
+        Hx = core_fields['Hx'][0] if scalar_input and 'Hx' in core_fields else core_fields.get('Hx')
+        Hy = core_fields['Hy'][0] if scalar_input and 'Hy' in core_fields else core_fields.get('Hy')
+        Hz = core_fields['Hz'][0] if scalar_input and 'Hz' in core_fields else core_fields.get('Hz')
+
+        E = [Ex, Ey, Ez]
+        H = [Hx, Hy, Hz]
+        if Ex is None and Ey is None and Ez is None:
+            E = None
+        if Hx is None and Hy is None and Hz is None:
+            H = None
+        return E, H
+
+    def Solve_FieldXZLayer(self, which_layer, z_list, y0=0.0, x_coords=None, components=('Ex',)):
+        all_components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+        requested_core = []
+        for name in components:
+            if name not in all_components:
+                raise ValueError(f'Unknown field component: {name}')
+            if name not in requested_core:
+                requested_core.append(name)
+
         coeffs, scalar_input = field_coefficients_batched(self, which_layer, z_list)
-        x_red, y0_red = line_reduced_coords(self, 'x', which_layer, x_coords, y0)
-        core_fields = reconstruct_line_core_fields(self, 'x', coeffs, x_red, y0_red, required_core)
-        return build_spatial_output(core_fields, requested_core, requested_derived, scalar_input)
+        x_coords, x_red, y0_red = get_line_coordinates(self, 'x', x_coords, y0, which_layer=which_layer)
+        indices = [all_components.index(name) for name in requested_core]
 
-    def Solve_FieldYZLayer(self, which_layer, z_list, x0=0.0, y_coords=None, components=('Ex',), derived=()):
-        requested_core, requested_derived, required_core = normalize_field_requests(components, derived)
+        spatial = get_ifft_xline_batch(x_red, y0_red, coeffs[:, indices, :], self.G, dtype_c=self.dtype_c, device=self.device)
+        core_fields = {name: spatial[:, idx] for idx, name in enumerate(requested_core)}
+
+        Ex = core_fields['Ex'][0] if scalar_input and 'Ex' in core_fields else core_fields.get('Ex')
+        Ey = core_fields['Ey'][0] if scalar_input and 'Ey' in core_fields else core_fields.get('Ey')
+        Ez = core_fields['Ez'][0] if scalar_input and 'Ez' in core_fields else core_fields.get('Ez')
+        Hx = core_fields['Hx'][0] if scalar_input and 'Hx' in core_fields else core_fields.get('Hx')
+        Hy = core_fields['Hy'][0] if scalar_input and 'Hy' in core_fields else core_fields.get('Hy')
+        Hz = core_fields['Hz'][0] if scalar_input and 'Hz' in core_fields else core_fields.get('Hz')
+
+        E = [Ex, Ey, Ez]
+        H = [Hx, Hy, Hz]
+        if Ex is None and Ey is None and Ez is None:
+            E = None
+        if Hx is None and Hy is None and Hz is None:
+            H = None
+        z_coords = torch.as_tensor(z_list, dtype=self.dtype_f, device=self.device)
+        if scalar_input:
+            z_coords = z_coords.reshape(())
+        return E, H, x_coords, z_coords
+
+    def Solve_FieldYZLayer(self, which_layer, z_list, x0=0.0, y_coords=None, components=('Ex',)):
+        all_components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+        requested_core = []
+        for name in components:
+            if name not in all_components:
+                raise ValueError(f'Unknown field component: {name}')
+            if name not in requested_core:
+                requested_core.append(name)
+
         coeffs, scalar_input = field_coefficients_batched(self, which_layer, z_list)
-        x0_red, y_red = line_reduced_coords(self, 'y', which_layer, y_coords, x0)
-        core_fields = reconstruct_line_core_fields(self, 'y', coeffs, y_red, x0_red, required_core)
-        return build_spatial_output(core_fields, requested_core, requested_derived, scalar_input)
+        y_coords, y_red, x0_red = get_line_coordinates(self, 'y', y_coords, x0, which_layer=which_layer)
+        indices = [all_components.index(name) for name in requested_core]
 
-    def Solve_FieldXZ(self, y0=0.0, x_coords=None, znum=32, z_step=None, components=('Ex',), derived=(), duplicate_interfaces=True):
-        requested_core, requested_derived, _ = normalize_field_requests(components, derived)
-        x_coords, _, _ = coerce_structure_line_coords(self, 'x', x_coords, y0)
+        spatial = get_ifft_yline_batch(x0_red, y_red, coeffs[:, indices, :], self.G, dtype_c=self.dtype_c, device=self.device)
+        core_fields = {name: spatial[:, idx] for idx, name in enumerate(requested_core)}
+
+        Ex = core_fields['Ex'][0] if scalar_input and 'Ex' in core_fields else core_fields.get('Ex')
+        Ey = core_fields['Ey'][0] if scalar_input and 'Ey' in core_fields else core_fields.get('Ey')
+        Ez = core_fields['Ez'][0] if scalar_input and 'Ez' in core_fields else core_fields.get('Ez')
+        Hx = core_fields['Hx'][0] if scalar_input and 'Hx' in core_fields else core_fields.get('Hx')
+        Hy = core_fields['Hy'][0] if scalar_input and 'Hy' in core_fields else core_fields.get('Hy')
+        Hz = core_fields['Hz'][0] if scalar_input and 'Hz' in core_fields else core_fields.get('Hz')
+
+        E = [Ex, Ey, Ez]
+        H = [Hx, Hy, Hz]
+        if Ex is None and Ey is None and Ez is None:
+            E = None
+        if Hx is None and Hy is None and Hz is None:
+            H = None
+        z_coords = torch.as_tensor(z_list, dtype=self.dtype_f, device=self.device)
+        if scalar_input:
+            z_coords = z_coords.reshape(())
+        return E, H, y_coords, z_coords
+
+    def Solve_FieldXZ(self, y0=0.0, x_coords=None, znum=32, z_step=None, components=('Ex',), duplicate_interfaces=True):
+        all_components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+        requested_core = []
+        for name in components:
+            if name not in all_components:
+                raise ValueError(f'Unknown field component: {name}')
+            if name not in requested_core:
+                requested_core.append(name)
+        x_coords, x_red, y0_red = get_line_coordinates(self, 'x', x_coords, y0)
         y0 = torch.as_tensor(y0, dtype=self.dtype_f, device=self.device)
         z_coords, segments, layer_ranges, layer_edges, mesh_z_step = build_structure_z_segments(
             self,
@@ -747,35 +994,41 @@ class obj:
             duplicate_interfaces=duplicate_interfaces,
         )
 
-        out = {name: [] for name in requested_core}
-        out.update({name: [] for name in requested_derived})
+        core_fields = {name: [] for name in requested_core}
+        indices = [all_components.index(name) for name in requested_core]
         for layer_index, local_z in segments:
-            layer_out = self.Solve_FieldXZLayer(
-                layer_index,
-                local_z,
-                y0=y0,
-                x_coords=x_coords,
-                components=requested_core,
-                derived=requested_derived,
-            )
+            coeffs, _ = field_coefficients_batched(self, layer_index, local_z)
+            spatial = get_ifft_xline_batch(x_red, y0_red, coeffs[:, indices, :], self.G, dtype_c=self.dtype_c, device=self.device)
+            layer_fields = {name: spatial[:, idx] for idx, name in enumerate(requested_core)}
             for name in requested_core:
-                out[name].append(layer_out[name])
-            for name in requested_derived:
-                out[name].append(layer_out[name])
+                core_fields[name].append(layer_fields[name])
 
-        for name in tuple(out.keys()):
-            out[name] = torch.concatenate(out[name], dim=0)
+        for name in requested_core:
+            core_fields[name] = torch.concatenate(core_fields[name], dim=0)
 
-        out['x_coords'] = x_coords
-        out['z_coords'] = z_coords
-        out['layer_ranges'] = layer_ranges
-        out['layer_edges'] = layer_edges
-        out['z_step'] = mesh_z_step
-        return out
+        Ex = core_fields.get('Ex')
+        Ey = core_fields.get('Ey')
+        Ez = core_fields.get('Ez')
+        Hx = core_fields.get('Hx')
+        Hy = core_fields.get('Hy')
+        Hz = core_fields.get('Hz')
+        E = [Ex, Ey, Ez]
+        H = [Hx, Hy, Hz]
+        if Ex is None and Ey is None and Ez is None:
+            E = None
+        if Hx is None and Hy is None and Hz is None:
+            H = None
+        return E, H, x_coords, z_coords, layer_ranges, layer_edges, mesh_z_step
 
-    def Solve_FieldYZ(self, x0=0.0, y_coords=None, znum=32, z_step=None, components=('Ex',), derived=(), duplicate_interfaces=True):
-        requested_core, requested_derived, _ = normalize_field_requests(components, derived)
-        y_coords, _, _ = coerce_structure_line_coords(self, 'y', y_coords, x0)
+    def Solve_FieldYZ(self, x0=0.0, y_coords=None, znum=32, z_step=None, components=('Ex',), duplicate_interfaces=True):
+        all_components = ('Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz')
+        requested_core = []
+        for name in components:
+            if name not in all_components:
+                raise ValueError(f'Unknown field component: {name}')
+            if name not in requested_core:
+                requested_core.append(name)
+        y_coords, y_red, x0_red = get_line_coordinates(self, 'y', y_coords, x0)
         x0 = torch.as_tensor(x0, dtype=self.dtype_f, device=self.device)
         z_coords, segments, layer_ranges, layer_edges, mesh_z_step = build_structure_z_segments(
             self,
@@ -784,31 +1037,31 @@ class obj:
             duplicate_interfaces=duplicate_interfaces,
         )
 
-        out = {name: [] for name in requested_core}
-        out.update({name: [] for name in requested_derived})
+        core_fields = {name: [] for name in requested_core}
+        indices = [all_components.index(name) for name in requested_core]
         for layer_index, local_z in segments:
-            layer_out = self.Solve_FieldYZLayer(
-                layer_index,
-                local_z,
-                x0=x0,
-                y_coords=y_coords,
-                components=requested_core,
-                derived=requested_derived,
-            )
+            coeffs, _ = field_coefficients_batched(self, layer_index, local_z)
+            spatial = get_ifft_yline_batch(x0_red, y_red, coeffs[:, indices, :], self.G, dtype_c=self.dtype_c, device=self.device)
+            layer_fields = {name: spatial[:, idx] for idx, name in enumerate(requested_core)}
             for name in requested_core:
-                out[name].append(layer_out[name])
-            for name in requested_derived:
-                out[name].append(layer_out[name])
+                core_fields[name].append(layer_fields[name])
 
-        for name in tuple(out.keys()):
-            out[name] = torch.concatenate(out[name], dim=0)
+        for name in requested_core:
+            core_fields[name] = torch.concatenate(core_fields[name], dim=0)
 
-        out['y_coords'] = y_coords
-        out['z_coords'] = z_coords
-        out['layer_ranges'] = layer_ranges
-        out['layer_edges'] = layer_edges
-        out['z_step'] = mesh_z_step
-        return out
+        Ex = core_fields.get('Ex')
+        Ey = core_fields.get('Ey')
+        Ez = core_fields.get('Ez')
+        Hx = core_fields.get('Hx')
+        Hy = core_fields.get('Hy')
+        Hz = core_fields.get('Hz')
+        E = [Ex, Ey, Ez]
+        H = [Hx, Hy, Hz]
+        if Ex is None and Ey is None and Ez is None:
+            E = None
+        if Hx is None and Hy is None and Hz is None:
+            H = None
+        return E, H, y_coords, z_coords, layer_ranges, layer_edges, mesh_z_step
 
     # State serialization
 
@@ -1012,32 +1265,31 @@ class obj:
 
     # Derived post-processing
 
-    def _default_absorption_shape(self, which_layer, eps_imag, Nxy):
+    def _solve_absorption_density(self, which_layer, eps_imag, min_znum=2, z_step=None, Nxy=None):
+        which_layer = self._validate_layer_index(which_layer)
         if Nxy is not None:
-            return int(Nxy[0]), int(Nxy[1])
-
-        if self.id_list[which_layer][0] == 1:
+            Nx, Ny = int(Nxy[0]), int(Nxy[1])
+        elif self.id_list[which_layer][0] == 1:
             Nx, Ny = self._default_grid_shape(which_layer)
-            return int(Nx), int(Ny)
+            Nx = int(Nx)
+            Ny = int(Ny)
+        else:
+            sample = eps_imag
+            if isinstance(sample, dict):
+                sample = next(iter(sample.values()))
+            if isinstance(sample, (list, tuple)) and len(sample) == 3:
+                sample = sample[0]
 
-        if isinstance(eps_imag, dict):
-            first_value = next(iter(eps_imag.values()))
-            return self._default_absorption_shape(which_layer, first_value, Nxy=None)
-
-        if isinstance(eps_imag, (list, tuple)) and len(eps_imag) == 3:
-            sample = torch.as_tensor(eps_imag[0], device=self.device)
+            sample = torch.as_tensor(sample, device=self.device)
             if sample.ndim == 2:
-                return int(sample.shape[0]), int(sample.shape[1])
+                Nx, Ny = int(sample.shape[0]), int(sample.shape[1])
+            elif self.GridLayer_Nxy_list:
+                Nx = max(shape[0] for shape in self.GridLayer_Nxy_list)
+                Ny = max(shape[1] for shape in self.GridLayer_Nxy_list)
+            else:
+                Nx = max(self.nG, 64)
+                Ny = max(self.nG, 64)
 
-        sample = torch.as_tensor(eps_imag, device=self.device)
-        if sample.ndim == 2:
-            return int(sample.shape[0]), int(sample.shape[1])
-
-        if self.GridLayer_Nxy_list:
-            return max(shape[0] for shape in self.GridLayer_Nxy_list), max(shape[1] for shape in self.GridLayer_Nxy_list)
-        return max(self.nG, 64), max(self.nG, 64)
-
-    def _coerce_absorption_pattern(self, eps_imag, Nx, Ny):
         def to_grid(component):
             tensor = torch.as_tensor(component, device=self.device)
             if torch.is_complex(tensor):
@@ -1049,34 +1301,28 @@ class obj:
                 raise ValueError(f'Absorption pattern must have shape ({Nx}, {Ny})')
             return tensor
 
-        if isinstance(eps_imag, (list, tuple)):
+        patterns = {}
+        if isinstance(eps_imag, dict):
+            for name, pattern in eps_imag.items():
+                if isinstance(pattern, (list, tuple)):
+                    if len(pattern) != 3:
+                        raise ValueError('Absorption pattern must be isotropic or a length-3 diagonal tuple/list')
+                    patterns[str(name)] = tuple(to_grid(component) for component in pattern)
+                else:
+                    grid = to_grid(pattern)
+                    patterns[str(name)] = (grid, grid, grid)
+        elif isinstance(eps_imag, (list, tuple)):
             if len(eps_imag) != 3:
                 raise ValueError('Absorption pattern must be isotropic or a length-3 diagonal tuple/list')
-            return tuple(to_grid(component) for component in eps_imag)
-
-        grid = to_grid(eps_imag)
-        return grid, grid, grid
-
-    def _coerce_absorption_patterns(self, eps_imag, Nx, Ny):
-        if isinstance(eps_imag, dict):
-            return {
-                str(name): self._coerce_absorption_pattern(pattern, Nx, Ny)
-                for name, pattern in eps_imag.items()
-            }
-        return {'default': self._coerce_absorption_pattern(eps_imag, Nx, Ny)}
-
-    def _solve_absorption_density(self, which_layer, eps_imag, min_znum=2, z_step=None, Nxy=None):
-        which_layer = self._validate_layer_index(which_layer)
-        Nx, Ny = self._default_absorption_shape(which_layer, eps_imag, Nxy)
-        patterns = self._coerce_absorption_patterns(eps_imag, Nx, Ny)
+            patterns['default'] = tuple(to_grid(component) for component in eps_imag)
+        else:
+            grid = to_grid(eps_imag)
+            patterns['default'] = (grid, grid, grid)
 
         z_count = max(int(min_znum), 2)
         z_coords = build_layer_z_points(self, self.thickness_list[which_layer], count=z_count, z_step=z_step)
-        field = self.Solve_FieldXY(which_layer, z_coords, Nxy=(Nx, Ny), components=('Ex', 'Ey', 'Ez'))
-
-        ex = field['Ex']
-        ey = field['Ey']
-        ez = field['Ez']
+        E, _ = self.Solve_FieldXY(which_layer, z_coords, Nxy=(Nx, Ny), components=('Ex', 'Ey', 'Ez'))
+        ex, ey, ez = E
         omega_real = torch.real(self.omega).to(dtype=self.dtype_f)
         densities = {}
         total_density = torch.zeros((z_coords.numel(), Nx, Ny), dtype=self.dtype_f, device=self.device)

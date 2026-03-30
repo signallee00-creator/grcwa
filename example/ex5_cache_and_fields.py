@@ -46,21 +46,22 @@ R, T = obj.RT_Solve(normalize=1)
 print('R =', R.item(), 'T =', T.item(), 'R + T =', (R + T).item())
 
 z_list = torch.linspace(0.0, 0.18, 9, dtype=torch.float64)
-field_xy = obj.Solve_FieldXY(1, z_list, components=('Ex',), derived=('E2norm',))
-field_xz = obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex', 'Hy'), derived=('Pz',))
-field_xz_layer = obj.Solve_FieldXZLayer(1, z_list, y0=0.0, components=('Ex', 'Hy'), derived=('Pz',))
+field_xy_e, field_xy_h = obj.Solve_FieldXY(1, z_list, components=('Ex',))
+field_xz_e, field_xz_h, x_coords, z_coords, _, _, _ = obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex', 'Hy'))
+field_xz_layer_e, field_xz_layer_h, _, _ = obj.Solve_FieldXZLayer(1, z_list, y0=0.0, components=('Ex', 'Hy'))
 
-print('XY Ex shape =', tuple(field_xy['Ex'].shape))
-print('XY E2norm shape =', tuple(field_xy['E2norm'].shape))
-print('XZ Ex shape =', tuple(field_xz['Ex'].shape))
-print('XZ Pz shape =', tuple(field_xz['Pz'].shape))
-print('XZ layer Ex shape =', tuple(field_xz_layer['Ex'].shape))
+print('XY Ex shape =', tuple(field_xy_e[0].shape))
+print('XY H is None =', field_xy_h is None)
+print('XZ Ex shape =', tuple(field_xz_e[0].shape))
+print('XZ Hy shape =', tuple(field_xz_h[1].shape))
+print('XZ layer Ex shape =', tuple(field_xz_layer_e[0].shape))
+print('x_coords shape =', tuple(x_coords.shape), 'z_coords shape =', tuple(z_coords.shape))
 
 with tempfile.NamedTemporaryFile(suffix='.pt', delete=False) as handle:
     path = handle.name
 
 obj.SaveState(path, include_caches=True)
 restored = grcwa.obj.LoadState(path)
-restored_field = restored.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',), derived=('E2norm',))
-print('Restored XZ Ex shape =', tuple(restored_field['Ex'].shape))
+restored_field = restored.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',))
+print('Restored XZ Ex shape =', tuple(restored_field[0][0].shape))
 os.remove(path)

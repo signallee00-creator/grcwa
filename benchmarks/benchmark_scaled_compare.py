@@ -178,15 +178,17 @@ def benchmark_current_scaling(label, nG, npattern, nx, ny, znum=3):
     amp_cached, _ = bench(lambda: [obj.GetAmplitudes_noTranslate(i) for i in range(obj.Layer_N)], repeat=3)
     amp_info = obj._amplitude_cache_info
 
-    xy_time, xy = bench(lambda: obj.Solve_FieldXY(layer_index, z_list, components=('Ex', 'Hy'), derived=('Pz', 'E2norm')), repeat=3)
+    xy_time, xy = bench(lambda: obj.Solve_FieldXY(layer_index, z_list, components=('Ex', 'Hy')), repeat=3)
 
     Ny = obj.GridLayer_Nxy_list[obj.id_list[layer_index][3]][1]
     iy = Ny // 3
     y0 = float(obj.L2[1]) * iy / Ny
-    xz_time, xz = bench(lambda: obj.Solve_FieldXZ(y0=y0, znum=znum, components=('Ex', 'Hy'), derived=('Pz', 'E2norm')), repeat=3)
-    start, stop = xz['layer_ranges'][layer_index]
-    local_z = xz['z_coords'][start:stop] - xz['layer_edges'][layer_index]
-    xy_slice = obj.Solve_FieldXY(layer_index, local_z, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    xz_time, xz = bench(lambda: obj.Solve_FieldXZ(y0=y0, znum=znum, components=('Ex', 'Hy')), repeat=3)
+    xz_e, xz_h, _, xz_z, xz_ranges, xz_edges, _ = xz
+    start, stop = xz_ranges[layer_index]
+    local_z = xz_z[start:stop] - xz_edges[layer_index]
+    xy_slice = obj.Solve_FieldXY(layer_index, local_z, components=('Ex', 'Hy'))
+    xy_e, xy_h = xy_slice
 
     print()
     print(f"{label}: current-only scaling, layers={obj.Layer_N}, nG={obj.nG}, grid={nx}x{ny}")
@@ -205,11 +207,9 @@ def benchmark_current_scaling(label, nG, npattern, nx, ny, znum=3):
     print(f"  Amp bN abs/rel = {format_abs_error(amp_info['bN_abs_error'])} / {format_rel_error(amp_info['bN_rel_error'])}")
     print(f"  Field XY = {xy_time:.4f}s")
     print(f"  Field XZ = {xz_time:.4f}s")
-    print(f"  XZ layer z-counts = {[stop_i - start_i for start_i, stop_i in xz['layer_ranges']]}")
-    print(f"  XZ/XY max |Ex diff| = {torch.max(torch.abs(xz['Ex'][start:stop] - xy_slice['Ex'][:, :, iy])).item():.3e}")
-    print(f"  XZ/XY max |Hy diff| = {torch.max(torch.abs(xz['Hy'][start:stop] - xy_slice['Hy'][:, :, iy])).item():.3e}")
-    print(f"  XZ/XY max |Pz diff| = {torch.max(torch.abs(xz['Pz'][start:stop] - xy_slice['Pz'][:, :, iy])).item():.3e}")
-    print(f"  XZ/XY max |E2norm diff| = {torch.max(torch.abs(xz['E2norm'][start:stop] - xy_slice['E2norm'][:, :, iy])).item():.3e}")
+    print(f"  XZ layer z-counts = {[stop_i - start_i for start_i, stop_i in xz_ranges]}")
+    print(f"  XZ/XY max |Ex diff| = {torch.max(torch.abs(xz_e[0][start:stop] - xy_e[0][:, :, iy])).item():.3e}")
+    print(f"  XZ/XY max |Hy diff| = {torch.max(torch.abs(xz_h[1][start:stop] - xy_h[1][:, :, iy])).item():.3e}")
 
 
 def main():

@@ -87,16 +87,17 @@ To get fields in real space on grid points ::
   E,H = obj.Solve_FieldOnGrid(which_layer,z_offset) # E = [Ex,Ey,Ez], H = [Hx,Hy,Hz]
   E,H = obj.Solve_FieldOnGrid(which_layer,z_offset,components=('Ex','Hy'))
 
-To get dict-based field outputs and reconstruct only the requested components::
+To get simplified field outputs and reconstruct only the requested components::
 
-  xy = obj.Solve_FieldXY(which_layer,z_offset,components=('Ex','Hy'),derived=('Pz','E2norm'))
-  xz = obj.Solve_FieldXZ(y0=0.0,znum=4,components=('Ex',))
-  yz = obj.Solve_FieldYZ(x0=0.0,znum=4,components=('Ex',))
-  xz_fine = obj.Solve_FieldXZ(y0=0.0,znum=3,z_step=0.01,components=('Ex',))
-  xz_layer = obj.Solve_FieldXZLayer(which_layer,z_list,y0=0.0,components=('Ex',))
+  E,H = obj.Solve_FieldXY(which_layer,z_offset,components=('Ex','Hy'))
+  E,H,x_coords,z_coords,layer_ranges,layer_edges,z_step = obj.Solve_FieldXZ(y0=0.0,znum=4,components=('Ex',))
+  E,H,y_coords,z_coords,layer_ranges,layer_edges,z_step = obj.Solve_FieldYZ(x0=0.0,znum=4,components=('Ex',))
+  E,H,x_coords,z_coords,layer_ranges,layer_edges,z_step = obj.Solve_FieldXZ(y0=0.0,znum=3,z_step=0.01,components=('Ex',))
+  E,H,x_coords,z_coords = obj.Solve_FieldXZLayer(which_layer,z_list,y0=0.0,components=('Ex',))
 
-  # xy['E2norm'] = |Ex|^2 + |Ey|^2 + |Ez|^2
-  # xy['Pz'] uses 0.5*Re(E x conj(H))
+  # E = [Ex,Ey,Ez], H = [Hx,Hy,Hz]
+  # unrequested components are None
+  # if only electric components are requested, H is returned as None
   # xz/yz return structure-wide cuts with x_coords/y_coords, z_coords, layer_ranges, and layer_edges
   # integer znum means the minimum samples per layer; thicker layers use the same approximate z_step mesh
   # z_step can be passed explicitly for structure-wide xz/yz cuts
@@ -116,7 +117,7 @@ To save and restore a baseline object state::
 
 For repeated z-scans, pass the whole z list in one call instead of looping Solve_FieldOnGrid externally::
 
-  field = obj.Solve_FieldXY(which_layer,z_list,components=('Ex',))
+  E,H = obj.Solve_FieldXY(which_layer,z_list,components=('Ex',))
   
 To get volume integration with respect to some convolution matrix *M* defined for 3 directions, respectively::
   

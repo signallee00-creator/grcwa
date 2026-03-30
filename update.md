@@ -68,20 +68,31 @@ Recommended usage for large structures:
 
 - Kept the legacy `Solve_FieldOnGrid(...)` API
 - Added selective component reconstruction via `components=(...)`
-- Added dict-based field APIs:
+- Simplified field APIs:
   - `Solve_FieldXY(...)`
   - `Solve_FieldXZLayer(...)`
   - `Solve_FieldYZLayer(...)`
   - `Solve_FieldXZ(...)`
   - `Solve_FieldYZ(...)`
-- Added derived outputs:
-  - `Px`, `Py`, `Pz`
-  - `E2norm`
-  - `Pnorm`
+
+Current field-return convention:
+
+- `Solve_FieldXY(...) -> E, H`
+- `Solve_FieldXZLayer(...) -> E, H, x_coords, z_coords`
+- `Solve_FieldYZLayer(...) -> E, H, y_coords, z_coords`
+- `Solve_FieldXZ(...) -> E, H, x_coords, z_coords, layer_ranges, layer_edges, z_step`
+- `Solve_FieldYZ(...) -> E, H, y_coords, z_coords, layer_ranges, layer_edges, z_step`
+
+where:
+
+- `E = [Ex, Ey, Ez]`
+- `H = [Hx, Hy, Hz]`
+- unrequested components are `None`
+- if only electric components are requested, `H` is returned as `None`
 
 ### 2.5 Structure-wide XZ / YZ sampling
 
-`Solve_FieldXZ(...)` and `Solve_FieldYZ(...)` now return whole-structure cuts, not just one-layer line cuts.
+`Solve_FieldXZ(...)` and `Solve_FieldYZ(...)` return whole-structure cuts, not just one-layer line cuts.
 
 Sampling rules:
 
@@ -131,6 +142,21 @@ Supported inputs:
 - multiple layers via dict or layer-aligned sequence
 
 The current implementation evaluates absorption from real-space `FieldXY(...)` samples.
+
+### 2.8 Readability cleanup
+
+The solver flow was cleaned up again to stay closer to the older `rcwa.py`
+style and make the code easier to read directly.
+
+Main points:
+
+- removed the temporary field helper files and moved the field logic back into
+  `grcwa/rcwa.py`
+- kept the public field APIs in legacy-style `E, H` form
+- reduced several tiny helper functions by merging line-coordinate handling and
+  simplifying the absorption input path
+- inlined S-matrix step construction where it is used so cache build/update is
+  easier to follow when reading the source
 
 ## 3. Examples and tests added
 

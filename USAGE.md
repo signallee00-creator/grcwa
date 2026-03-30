@@ -62,27 +62,28 @@ Legacy API:
 E, H = obj.Solve_FieldOnGrid(which_layer, z_offset, components=('Ex', 'Hy'))
 ```
 
-Dict-based APIs:
+Extended APIs:
 
 ```python
-xy = obj.Solve_FieldXY(which_layer, z_list, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
-xz = obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex', 'Hy'))
-yz = obj.Solve_FieldYZ(x0=0.0, znum=3, components=('Ex',))
+E, H = obj.Solve_FieldXY(which_layer, z_list, components=('Ex', 'Hy'))
+E, H, x_coords, z_coords, layer_ranges, layer_edges, z_step = obj.Solve_FieldXZ(
+    y0=0.0, znum=3, components=('Ex', 'Hy')
+)
+E, H, y_coords, z_coords, layer_ranges, layer_edges, z_step = obj.Solve_FieldYZ(
+    x0=0.0, znum=3, components=('Ex',)
+)
 ```
 
 Notes:
 
 - `Solve_FieldXZ()` and `Solve_FieldYZ()` return whole-structure cuts
 - `Solve_FieldXZLayer()` and `Solve_FieldYZLayer()` return single-layer line cuts
+- `Solve_FieldXY()` returns `E, H` where `E = [Ex, Ey, Ez]` and `H = [Hx, Hy, Hz]`
+- unrequested components are `None`
+- if only electric components are requested, `H` is returned as `None`
 - integer `znum` means the minimum samples per layer
 - thicker layers follow the same approximate `z_step`
 - pass `z_step=...` to control structure-wide spacing directly
-
-Derived keys:
-
-- `Px`, `Py`, `Pz`
-- `E2norm = |Ex|^2 + |Ey|^2 + |Ez|^2`
-- `Pnorm = sqrt(Px^2 + Py^2 + Pz^2)`
 
 ## Partial Layer Updates
 

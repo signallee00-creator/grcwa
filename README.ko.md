@@ -7,7 +7,7 @@
 - torch-only 구현
 - `device`, `dtype_f`, `dtype_c`를 명시적으로 제어
 - S-matrix cache, amplitude cache, partial grid-layer update 지원
-- `FieldXY`, `FieldXZ`, `FieldYZ` 같은 dict 기반 field API 추가
+- `Solve_FieldXY`, `Solve_FieldXZ`, `Solve_FieldYZ` 같은 legacy-style `E, H` field API 지원
 - save/load state와 baseline 재사용 지원
 
 ## 추천 기본 설정

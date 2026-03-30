@@ -199,23 +199,28 @@ Fast-path notes
 
 * Reconstruct only what you need::
 
-    field_xy = obj.Solve_FieldXY(which_layer, z_list,
-                                 components=('Ex',),
-                                 derived=('E2norm',))
+    E, H = obj.Solve_FieldXY(which_layer, z_list,
+                             components=('Ex',))
 
 * Use dedicated line-cut APIs instead of reconstructing full 2D fields
   when you only need *XZ* or *YZ* views::
 
-    field_xz = obj.Solve_FieldXZ(y0=0.0, znum=4,
-                                 components=('Ex',))
-    field_xz_fine = obj.Solve_FieldXZ(y0=0.0, znum=3, z_step=0.01,
-                                      components=('Ex',))
+    E, H, x_coords, z_coords, layer_ranges, layer_edges, z_step = obj.Solve_FieldXZ(
+        y0=0.0, znum=4, components=('Ex',)
+    )
+    E, H, x_coords, z_coords, layer_ranges, layer_edges, z_step = obj.Solve_FieldXZ(
+        y0=0.0, znum=3, z_step=0.01, components=('Ex',)
+    )
 
   `Solve_FieldXZ` and `Solve_FieldYZ` return whole-structure cuts. For a
   single-layer line cut, use `Solve_FieldXZLayer` or `Solve_FieldYZLayer`.
   Integer ``znum`` means the minimum samples per layer; thicker layers are
   sampled on the same approximate ``z_step`` mesh. Pass ``z_step`` explicitly
   when you want to control the structure-wide spacing directly.
+
+  `Solve_FieldXY` returns ``E, H`` where ``E = [Ex, Ey, Ez]`` and
+  ``H = [Hx, Hy, Hz]``. Unrequested components are returned as ``None``.
+  If only electric components are requested, ``H`` is returned as ``None``.
 
   To post-process absorption from user-supplied Im(eps) patterns::
 

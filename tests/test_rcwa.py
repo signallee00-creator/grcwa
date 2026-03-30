@@ -1,7 +1,6 @@
 import torch
 import grcwa
-from grcwa.rcwa import SolveExterior, SolveInterior
-from grcwa._field_views import build_layer_z_points
+from grcwa.rcwa import SolveExterior, SolveInterior, build_layer_z_points
 
 from .utils import t_grad
 
@@ -102,6 +101,17 @@ def rcwa_small_assembly(grid_override=None):
 
 def _assert_close(lhs, rhs, atol=1e-7, rtol=1e-6):
     assert torch.allclose(lhs, rhs, atol=atol, rtol=rtol), f"max error={torch.max(torch.abs(lhs-rhs)).item()}"
+
+
+def _assert_field_list_close(lhs, rhs):
+    if lhs is None or rhs is None:
+        assert lhs is None and rhs is None
+        return
+    for left, right in zip(lhs, rhs):
+        if left is None or right is None:
+            assert left is None and right is None
+        else:
+            _assert_close(left, right)
 
 
 def test_rcwa():
@@ -239,10 +249,10 @@ def test_partial_update_matches_full_rebuild():
     _assert_close(R_partial, R_full)
     _assert_close(T_partial, T_full)
 
-    field_partial = obj_partial.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
-    field_full = obj_full.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
-    for key in field_partial:
-        _assert_close(field_partial[key], field_full[key])
+    field_partial = obj_partial.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'))
+    field_full = obj_full.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'))
+    _assert_field_list_close(field_partial[0], field_full[0])
+    _assert_field_list_close(field_partial[1], field_full[1])
 
     restored, _ = rcwa_small_assembly()
     restored.RestoreState(state, restore_caches=True)
@@ -284,19 +294,19 @@ def test_clear_smatrix_cache_keeps_lightweight_cached_solves(tmp_path):
     obj.BuildAmplitudeCache()
 
     rt_ref = obj.RT_Solve(normalize=1)
-    field_ref = obj.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    field_ref = obj.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'))
 
     obj.ClearSMatrixCache()
     assert obj._prefix_smat is None
     assert obj._suffix_smat is None
 
     rt_cleared = obj.RT_Solve(normalize=1)
-    field_cleared = obj.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    field_cleared = obj.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'))
 
     _assert_close(rt_cleared[0], rt_ref[0])
     _assert_close(rt_cleared[1], rt_ref[1])
-    for key in field_ref:
-        _assert_close(field_cleared[key], field_ref[key])
+    _assert_field_list_close(field_cleared[0], field_ref[0])
+    _assert_field_list_close(field_cleared[1], field_ref[1])
 
     state_path = tmp_path / "lightweight_cache_state.pt"
     obj.SaveState(state_path, include_caches=True)
@@ -305,12 +315,12 @@ def test_clear_smatrix_cache_keeps_lightweight_cached_solves(tmp_path):
     assert loaded._prefix_smat is None
     assert loaded._suffix_smat is None
     rt_loaded = loaded.RT_Solve(normalize=1)
-    field_loaded = loaded.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    field_loaded = loaded.Solve_FieldXY(1, [0.0, 0.05], components=('Ex', 'Hy'))
 
     _assert_close(rt_loaded[0], rt_ref[0])
     _assert_close(rt_loaded[1], rt_ref[1])
-    for key in field_ref:
-        _assert_close(field_loaded[key], field_ref[key])
+    _assert_field_list_close(field_loaded[0], field_ref[0])
+    _assert_field_list_close(field_loaded[1], field_ref[1])
 
 
 def test_absorption_layer_z_matches_direct_field_sum():
@@ -320,9 +330,9 @@ def test_absorption_layer_z_matches_direct_field_sum():
     result = obj.Solve_AbsorptionLayerZ(1, loss_grid, min_znum=5, normalize=0)
 
     z_coords = result['z_coords']
-    field = obj.Solve_FieldXY(1, z_coords, Nxy=loss_grid.shape, components=('Ex', 'Ey', 'Ez'))
+    field, _ = obj.Solve_FieldXY(1, z_coords, Nxy=loss_grid.shape, components=('Ex', 'Ey', 'Ez'))
     e2_loss = loss_grid.unsqueeze(0) * (
-        torch.abs(field['Ex']) ** 2 + torch.abs(field['Ey']) ** 2 + torch.abs(field['Ez']) ** 2
+        torch.abs(field[0]) ** 2 + torch.abs(field[1]) ** 2 + torch.abs(field[2]) ** 2
     )
     cell_area = torch.abs(obj.L1[0] * obj.L2[1] - obj.L1[1] * obj.L2[0]) * obj.Pscale ** 2
     dA = cell_area / (loss_grid.shape[0] * loss_grid.shape[1])
@@ -340,9 +350,9 @@ def test_absorption_layer_xy_matches_direct_field_sum():
     result = obj.Solve_AbsorptionLayerXY(1, loss_grid, min_znum=5, normalize=0)
 
     z_coords = build_layer_z_points(obj, obj.thickness_list[1], count=5, z_step=None)
-    field = obj.Solve_FieldXY(1, z_coords, Nxy=loss_grid.shape, components=('Ex', 'Ey', 'Ez'))
+    field, _ = obj.Solve_FieldXY(1, z_coords, Nxy=loss_grid.shape, components=('Ex', 'Ey', 'Ez'))
     density = 0.5 * torch.real(obj.omega).to(dtype=obj.dtype_f) * loss_grid.unsqueeze(0) * (
-        torch.abs(field['Ex']) ** 2 + torch.abs(field['Ey']) ** 2 + torch.abs(field['Ez']) ** 2
+        torch.abs(field[0]) ** 2 + torch.abs(field[1]) ** 2 + torch.abs(field[2]) ** 2
     )
     expected_xy = torch.trapz(density, z_coords, dim=0)
     cell_area = torch.abs(obj.L1[0] * obj.L2[1] - obj.L1[1] * obj.L2[0]) * obj.Pscale ** 2
@@ -376,13 +386,17 @@ def test_field_component_selection_and_new_views(tmp_path):
     legacy_ex = obj.Solve_FieldOnGrid(1, 0.0, components=('Ex',))
     _assert_close(legacy_ex[0][0], legacy_full[0][0])
     assert legacy_ex[0][1] is None
-    assert legacy_ex[1][0] is None
+    assert legacy_ex[1] is None
 
-    xy = obj.Solve_FieldXY(1, 0.0, components=('Ex', 'Hy'), derived=('E2norm',))
-    _assert_close(xy['Ex'], legacy_full[0][0])
-    _assert_close(xy['Hy'], legacy_full[1][1])
-    expected_e2 = torch.abs(legacy_full[0][0]) ** 2 + torch.abs(legacy_full[0][1]) ** 2 + torch.abs(legacy_full[0][2]) ** 2
-    _assert_close(xy['E2norm'], expected_e2)
+    xy_e, xy_h = obj.Solve_FieldXY(1, 0.0, components=('Ex', 'Hy'))
+    _assert_close(xy_e[0], legacy_full[0][0])
+    _assert_close(xy_h[1], legacy_full[1][1])
+    assert xy_e[1] is None
+    assert xy_h[0] is None
+
+    xy_only_e, xy_only_h = obj.Solve_FieldXY(1, 0.0, components=('Ex', 'Ey', 'Ez'))
+    _assert_close(xy_only_e[0], legacy_full[0][0])
+    assert xy_only_h is None
 
     Nx_small, Ny_small = obj.GridLayer_Nxy_list[obj.id_list[1][3]]
     iy = Ny_small // 3
@@ -390,46 +404,50 @@ def test_field_component_selection_and_new_views(tmp_path):
     y0_value = torch.as_tensor(obj.L2[1], dtype=obj.dtype_f, device=obj.device) * iy / Ny_small
     x0_value = torch.as_tensor(obj.L1[0], dtype=obj.dtype_f, device=obj.device) * ix / Nx_small
 
-    xy_stack = obj.Solve_FieldXY(1, [0.0, 0.04], components=('Ex', 'Hy'))
-    xz_layer = obj.Solve_FieldXZLayer(1, [0.0, 0.04], y0=y0_value, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
-    yz_layer = obj.Solve_FieldYZLayer(1, [0.0, 0.04], x0=x0_value, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    xy_stack_e, xy_stack_h = obj.Solve_FieldXY(1, [0.0, 0.04], components=('Ex', 'Hy'))
+    xz_layer_e, xz_layer_h, _, _ = obj.Solve_FieldXZLayer(1, [0.0, 0.04], y0=y0_value, components=('Ex', 'Hy'))
+    yz_layer_e, yz_layer_h, _, _ = obj.Solve_FieldYZLayer(1, [0.0, 0.04], x0=x0_value, components=('Ex', 'Hy'))
 
-    _assert_close(xz_layer['Ex'], xy_stack['Ex'][:, :, iy])
-    _assert_close(xz_layer['Hy'], xy_stack['Hy'][:, :, iy])
-    _assert_close(yz_layer['Ex'], xy_stack['Ex'][:, ix, :])
-    _assert_close(yz_layer['Hy'], xy_stack['Hy'][:, ix, :])
+    _assert_close(xz_layer_e[0], xy_stack_e[0][:, :, iy])
+    _assert_close(xz_layer_h[1], xy_stack_h[1][:, :, iy])
+    _assert_close(yz_layer_e[0], xy_stack_e[0][:, ix, :])
+    _assert_close(yz_layer_h[1], xy_stack_h[1][:, ix, :])
 
-    xz = obj.Solve_FieldXZ(y0=y0_value, znum=[2] * obj.Layer_N, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
-    yz = obj.Solve_FieldYZ(x0=x0_value, znum=[2] * obj.Layer_N, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    xz_e, xz_h, _, xz_z, xz_ranges, _, _ = obj.Solve_FieldXZ(y0=y0_value, znum=[2] * obj.Layer_N, components=('Ex', 'Hy'))
+    yz_e, yz_h, _, yz_z, yz_ranges, _, _ = obj.Solve_FieldYZ(x0=x0_value, znum=[2] * obj.Layer_N, components=('Ex', 'Hy'))
 
-    start1, stop1 = xz['layer_ranges'][1]
-    start2, stop2 = yz['layer_ranges'][1]
-    _assert_close(xz['Ex'][start1:stop1], obj.Solve_FieldXZLayer(1, [0.0, obj.thickness_list[1]], y0=y0_value, components=('Ex',), derived=())['Ex'])
-    _assert_close(yz['Ex'][start2:stop2], obj.Solve_FieldYZLayer(1, [0.0, obj.thickness_list[1]], x0=x0_value, components=('Ex',), derived=())['Ex'])
-    assert torch.isclose(xz['z_coords'][xz['layer_ranges'][0][1] - 1], xz['z_coords'][xz['layer_ranges'][1][0]])
-    assert torch.isclose(yz['z_coords'][yz['layer_ranges'][0][1] - 1], yz['z_coords'][yz['layer_ranges'][1][0]])
+    start1, stop1 = xz_ranges[1]
+    start2, stop2 = yz_ranges[1]
+    xz_layer_ref_e, _, _, _ = obj.Solve_FieldXZLayer(1, [0.0, obj.thickness_list[1]], y0=y0_value, components=('Ex',))
+    yz_layer_ref_e, _, _, _ = obj.Solve_FieldYZLayer(1, [0.0, obj.thickness_list[1]], x0=x0_value, components=('Ex',))
+    _assert_close(xz_e[0][start1:stop1], xz_layer_ref_e[0])
+    _assert_close(yz_e[0][start2:stop2], yz_layer_ref_e[0])
+    assert torch.isclose(xz_z[xz_ranges[0][1] - 1], xz_z[xz_ranges[1][0]])
+    assert torch.isclose(yz_z[yz_ranges[0][1] - 1], yz_z[yz_ranges[1][0]])
 
     state_path = tmp_path / "baseline_state.pt"
     obj.BuildSMatrixCache()
     obj.BuildAmplitudeCache()
     obj.SaveState(state_path, include_caches=True)
     loaded = grcwa.obj.LoadState(state_path, map_location='cpu')
-    for key in ('Ex', 'Hy', 'Pz', 'E2norm'):
-        _assert_close(loaded.Solve_FieldXZLayer(1, [0.0, 0.04], y0=y0_value, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))[key], xz_layer[key])
+    loaded_e, loaded_h, _, _ = loaded.Solve_FieldXZLayer(1, [0.0, 0.04], y0=y0_value, components=('Ex', 'Hy'))
+    _assert_close(loaded_e[0], xz_layer_e[0])
+    _assert_close(loaded_h[1], xz_layer_h[1])
 
 
 def test_structure_xz_uses_mesh_like_z_sampling():
     obj, _ = rcwa_small_assembly()
-    xz = obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',))
+    _, _, _, _, xz_ranges, _, xz_step = obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',))
 
     expected_z_step = float(torch.min(torch.stack([torch.as_tensor(t, dtype=obj.dtype_f) for t in obj.thickness_list])).item()) / 2.0
-    assert xz['z_step'] == expected_z_step
+    assert xz_step == expected_z_step
 
-    counts = [stop - start for start, stop in xz['layer_ranges']]
+    counts = [stop - start for start, stop in xz_ranges]
     assert counts == [5, 6, 3, 7, 4]
 
-    for layer_index, (start, stop) in enumerate(xz['layer_ranges']):
-        local_z = xz['z_coords'][start:stop] - xz['layer_edges'][layer_index]
+    _, _, _, xz_z, xz_ranges, xz_edges, _ = obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',))
+    for layer_index, (start, stop) in enumerate(xz_ranges):
+        local_z = xz_z[start:stop] - xz_edges[layer_index]
         dz = local_z[1:] - local_z[:-1]
         if counts[layer_index] == 3:
             _assert_close(dz, torch.full_like(dz, expected_z_step))
@@ -437,10 +455,10 @@ def test_structure_xz_uses_mesh_like_z_sampling():
             _assert_close(dz[:-1], torch.full_like(dz[:-1], expected_z_step))
             assert dz[-1] <= expected_z_step + 1e-12
 
-    xz_fixed = obj.Solve_FieldXZ(y0=0.0, znum=3, z_step=0.05, components=('Ex',))
-    fixed_counts = [stop - start for start, stop in xz_fixed['layer_ranges']]
+    _, _, _, _, xz_fixed_ranges, _, xz_fixed_step = obj.Solve_FieldXZ(y0=0.0, znum=3, z_step=0.05, components=('Ex',))
+    fixed_counts = [stop - start for start, stop in xz_fixed_ranges]
     assert fixed_counts == [4, 5, 3, 6, 4]
-    assert xz_fixed['z_step'] == 0.05
+    assert xz_fixed_step == 0.05
 
 
 def test_structure_xz_mesh_matches_layerwise_field_xy():
@@ -449,14 +467,15 @@ def test_structure_xz_mesh_matches_layerwise_field_xy():
     iy = Ny_small // 3
     y0_value = torch.as_tensor(obj.L2[1], dtype=obj.dtype_f, device=obj.device) * iy / Ny_small
 
-    xz = obj.Solve_FieldXZ(y0=y0_value, znum=3, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    xz_e, xz_h, _, xz_z, xz_ranges, xz_edges, _ = obj.Solve_FieldXZ(y0=y0_value, znum=3, components=('Ex', 'Hy'))
     layer_index = 1
-    start, stop = xz['layer_ranges'][layer_index]
-    local_z = xz['z_coords'][start:stop] - xz['layer_edges'][layer_index]
+    start, stop = xz_ranges[layer_index]
+    local_z = xz_z[start:stop] - xz_edges[layer_index]
 
-    xz_layer = obj.Solve_FieldXZLayer(layer_index, local_z, y0=y0_value, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
-    xy_layer = obj.Solve_FieldXY(layer_index, local_z, components=('Ex', 'Hy'), derived=('Pz', 'E2norm'))
+    xz_layer_e, xz_layer_h, _, _ = obj.Solve_FieldXZLayer(layer_index, local_z, y0=y0_value, components=('Ex', 'Hy'))
+    xy_layer_e, xy_layer_h = obj.Solve_FieldXY(layer_index, local_z, components=('Ex', 'Hy'))
 
-    for key in ('Ex', 'Hy', 'Pz', 'E2norm'):
-        _assert_close(xz[key][start:stop], xz_layer[key])
-        _assert_close(xz_layer[key], xy_layer[key][:, :, iy])
+    _assert_close(xz_e[0][start:stop], xz_layer_e[0])
+    _assert_close(xz_h[1][start:stop], xz_layer_h[1])
+    _assert_close(xz_layer_e[0], xy_layer_e[0][:, :, iy])
+    _assert_close(xz_layer_h[1], xy_layer_h[1][:, :, iy])

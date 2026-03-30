@@ -63,8 +63,8 @@ def main():
     bench("Amplitude cached", lambda: [obj.GetAmplitudes_noTranslate(i) for i in range(obj.Layer_N)])
 
     bench("Field full grid", lambda: obj.Solve_FieldOnGrid(1, z_list))
-    bench("Field selective XY", lambda: obj.Solve_FieldXY(1, z_list, components=('Ex',), derived=('E2norm',)))
-    bench("Field XZ line", lambda: obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',), derived=('Pz',)))
+    bench("Field selective XY", lambda: obj.Solve_FieldXY(1, z_list, components=('Ex',)))
+    bench("Field XZ line", lambda: obj.Solve_FieldXZ(y0=0.0, znum=3, components=('Ex',)))
 
     new_grid = torch.roll(grid0, shifts=3, dims=0)
     baseline = obj.ExportState(include_caches=True)

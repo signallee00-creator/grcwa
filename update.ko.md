@@ -75,18 +75,27 @@ obj.ClearSMatrixCache()
 
 - 기존 `Solve_FieldOnGrid(...)` 유지
 - `components=(...)`로 필요한 성분만 복원 가능
-- 새 dict API:
+- 단순화된 field API:
   - `Solve_FieldXY(...)`
   - `Solve_FieldXZLayer(...)`
   - `Solve_FieldYZLayer(...)`
   - `Solve_FieldXZ(...)`
   - `Solve_FieldYZ(...)`
 
-derived:
+현재 반환 형식:
 
-- `Px`, `Py`, `Pz`
-- `E2norm`
-- `Pnorm`
+- `Solve_FieldXY(...) -> E, H`
+- `Solve_FieldXZLayer(...) -> E, H, x_coords, z_coords`
+- `Solve_FieldYZLayer(...) -> E, H, y_coords, z_coords`
+- `Solve_FieldXZ(...) -> E, H, x_coords, z_coords, layer_ranges, layer_edges, z_step`
+- `Solve_FieldYZ(...) -> E, H, y_coords, z_coords, layer_ranges, layer_edges, z_step`
+
+여기서:
+
+- `E = [Ex, Ey, Ez]`
+- `H = [Hx, Hy, Hz]`
+- 요청하지 않은 성분은 `None`
+- 전기장만 요청하면 `H`는 `None`
 
 ### 2.6 save / load
 
@@ -100,6 +109,19 @@ derived:
 - 가장 가벼운 baseline 저장: `include_caches=False`
 - field 계산용 가벼운 cached state 저장:
   `BuildAmplitudeCache()` 후 `ClearSMatrixCache()` 하고 `include_caches=True`
+
+### 2.7 가독성 정리
+
+코드를 예전 `rcwa.py`를 읽던 흐름에 더 가깝게 다시 정리했습니다.
+
+핵심:
+
+- 임시 field helper 파일들을 없애고 field 계산을 다시 `grcwa/rcwa.py` 안으로 정리
+- public field API는 legacy 스타일 `E, H` 반환 형태 유지
+- line 좌표 처리와 absorption 입력 정리 쪽의 작은 helper 몇 개를 합쳐서
+  함수 수를 줄임
+- cache build/update에서 step S-matrix 생성 위치를 바로 보이게 해서
+  소스만 읽어도 흐름을 따라가기 쉽게 정리
 
 ## 3. 벤치 요약
 
