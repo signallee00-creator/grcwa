@@ -9,318 +9,7 @@ from .kbloch import Lattice_Reciprocate, Lattice_getG, Lattice_SetKs
 STATE_VERSION = 1
 
 
-# Lightweight tensor and serialization helpers
-def _clone_nested(value):
-    if value is None:
-        return None
-    if torch.is_tensor(value):
-        return value.clone()
-    if isinstance(value, tuple):
-        return tuple(_clone_nested(item) for item in value)
-    if isinstance(value, list):
-        return [_clone_nested(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _clone_nested(item) for key, item in value.items()}
-    if isinstance(value, set):
-        return set(value)
-    return copy.deepcopy(value)
-
-
-def _coerce_grid_eps(ep_grid, Nx, Ny, dtype_f, device):
-    if isinstance(ep_grid, (list, tuple)):
-        if len(ep_grid) != 3:
-            raise ValueError('Anisotropic epsilon input must contain exactly three components')
-        out = []
-        for component in ep_grid:
-            tensor = torch.as_tensor(component, dtype=dtype_f, device=device)
-            if tensor.numel() != Nx * Ny:
-                raise ValueError('Each epsilon component must have Nx*Ny entries')
-            out.append(tensor.reshape(Nx, Ny))
-        return out
-
-    tensor = torch.as_tensor(ep_grid, dtype=dtype_f, device=device)
-    if tensor.numel() != Nx * Ny:
-        raise ValueError('Epsilon grid must have Nx*Ny entries')
-    return tensor.reshape(Nx, Ny)
-
-
-def field_coefficients_batched(obj, which_layer, z_offset):
-    """Return stacked Fourier coefficients for Ex,Ey,Ez,Hx,Hy,Hz."""
-    which_layer = obj._validate_layer_index(which_layer)
-    z_tensor = torch.as_tensor(z_offset, dtype=obj.dtype_f, device=obj.device)
-    scalar_input = z_tensor.ndim == 0
-    if scalar_input:
-        z_tensor = z_tensor.reshape(1)
-    ai0, bi0 = obj.GetAmplitudes_noTranslate(which_layer)
-
-    q = obj.q_list[which_layer]
-    phi = obj.phi_list[which_layer]
-    kp = obj.kp_list[which_layer]
-    thickness = torch.as_tensor(obj.thickness_list[which_layer], dtype=obj.dtype_f, device=obj.device)
-
-    dz = z_tensor.reshape(-1, 1)
-    q_row = q.reshape(1, -1)
-    ai = ai0.reshape(1, -1) * torch.exp(1j * q_row * dz)
-    bi = bi0.reshape(1, -1) * torch.exp(1j * q_row * (thickness - dz))
-
-    fhxy = torch.matmul(ai + bi, torch.transpose(phi, 0, 1))
-    fhx = fhxy[:, :obj.nG]
-    fhy = fhxy[:, obj.nG:]
-
-    tmp1 = (ai - bi) / (obj.omega * q_row)
-    tmp2 = torch.matmul(tmp1, torch.transpose(phi, 0, 1))
-    fexy = torch.matmul(tmp2, torch.transpose(kp, 0, 1))
-    fey = -fexy[:, :obj.nG]
-    fex = fexy[:, obj.nG:]
-
-    fhz = (obj.kx.reshape(1, -1) * fey - obj.ky.reshape(1, -1) * fex) / obj.omega
-    fez = (obj.ky.reshape(1, -1) * fhx - obj.kx.reshape(1, -1) * fhy) / obj.omega
-    if obj.id_list[which_layer][0] == 0:
-        fez = fez / obj.Uniform_ep_list[obj.id_list[which_layer][2]]
-    else:
-        epinv = obj.Patterned_epinv_list[obj.id_list[which_layer][2]]
-        fez = torch.matmul(fez, torch.transpose(epinv, 0, 1))
-
-    coeffs = torch.stack((fex, fey, fez, fhx, fhy, fhz), dim=1)
-    return coeffs, scalar_input
-
-
-def get_line_coordinates(obj, axis, coords, fixed_coord, which_layer=None):
-    """
-    Return physical coordinates and reduced coordinates for line cuts.
-
-    If ``which_layer`` is given, the default coordinate count follows that
-    layer's grid shape. Otherwise a structure-wide default count is used.
-    """
-    length_x = torch.linalg.norm(obj.L1)
-    length_y = torch.linalg.norm(obj.L2)
-
-    if coords is None:
-        if not obj._layer_is_axis_aligned():
-            raise ValueError('Auto-generated x/y coordinates are only available for axis-aligned orthogonal lattices')
-
-        if which_layer is not None:
-            Nx, Ny = obj._default_grid_shape(which_layer)
-            count = Nx if axis == 'x' else Ny
-        elif axis == 'x':
-            count = max(shape[0] for shape in obj.GridLayer_Nxy_list) if obj.GridLayer_Nxy_list else max(obj.nG, 64)
-        else:
-            count = max(shape[1] for shape in obj.GridLayer_Nxy_list) if obj.GridLayer_Nxy_list else max(obj.nG, 64)
-
-        if axis == 'x':
-            coords = torch.arange(count, dtype=obj.dtype_f, device=obj.device) / count * obj.L1[0]
-        else:
-            coords = torch.arange(count, dtype=obj.dtype_f, device=obj.device) / count * obj.L2[1]
-
-    coords = torch.as_tensor(coords, dtype=obj.dtype_f, device=obj.device)
-    fixed_coord = torch.as_tensor(fixed_coord, dtype=obj.dtype_f, device=obj.device)
-    if axis == 'x':
-        return coords, coords / length_x, fixed_coord / length_y
-    return coords, coords / length_y, fixed_coord / length_x
-
-
-def build_layer_z_points(obj, thickness, count=None, z_step=None):
-    thickness = torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device)
-
-    if z_step is None:
-        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
-
-    if thickness.item() == 0.0:
-        return torch.zeros((count,), dtype=obj.dtype_f, device=obj.device)
-
-    if thickness.item() <= z_step * (count - 1):
-        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
-
-    local_z = torch.arange(0.0, float(thickness.item()), z_step, dtype=obj.dtype_f, device=obj.device)
-    if local_z.numel() == 0 or not torch.isclose(local_z[0], thickness.new_zeros(())):
-        local_z = thickness.new_zeros((1,))
-
-    if not torch.isclose(local_z[-1], thickness):
-        local_z = torch.concatenate((local_z, thickness.reshape(1)))
-
-    if local_z.numel() < count:
-        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
-
-    return local_z
-
-
-def build_structure_z_segments(obj, znum=32, z_step=None, duplicate_interfaces=True):
-    if torch.is_tensor(znum):
-        znum = znum.tolist()
-
-    if isinstance(znum, numbers.Integral):
-        min_znum = max(int(znum), 2)
-        if z_step is None:
-            positive_thicknesses = []
-            for thickness in obj.thickness_list:
-                thickness_value = float(torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device).item())
-                if thickness_value > 0.0:
-                    positive_thicknesses.append(thickness_value)
-            if positive_thicknesses and min_znum > 1:
-                mesh_z_step = min(positive_thicknesses) / (min_znum - 1)
-            else:
-                mesh_z_step = None
-            z_counts = None
-        else:
-            mesh_z_step = float(torch.as_tensor(z_step, dtype=obj.dtype_f, device=obj.device).item())
-            if mesh_z_step <= 0.0:
-                raise ValueError('z_step must be positive')
-            z_counts = None
-    else:
-        if z_step is not None:
-            raise ValueError('z_step cannot be combined with a per-layer znum sequence')
-        z_counts = [max(int(value), 2) for value in znum]
-        if len(z_counts) != obj.Layer_N:
-            raise ValueError('znum sequence must have one entry per layer')
-        min_znum = None
-        mesh_z_step = None
-
-    z_pieces = []
-    segments = []
-    layer_ranges = []
-    layer_edges = [torch.zeros((), dtype=obj.dtype_f, device=obj.device)]
-    z_offset = torch.zeros((), dtype=obj.dtype_f, device=obj.device)
-    cursor = 0
-
-    for layer_index, thickness in enumerate(obj.thickness_list):
-        thickness = torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device)
-        if z_counts is None:
-            local_z = build_layer_z_points(obj, thickness, count=min_znum, z_step=mesh_z_step)
-        else:
-            local_z = build_layer_z_points(obj, thickness, count=z_counts[layer_index], z_step=None)
-
-        global_z = z_offset + local_z
-        if layer_index > 0 and not duplicate_interfaces:
-            local_z = local_z[1:]
-            global_z = global_z[1:]
-
-        start = cursor
-        stop = cursor + local_z.numel()
-        layer_ranges.append((start, stop))
-        segments.append((layer_index, local_z))
-        z_pieces.append(global_z)
-        cursor = stop
-        z_offset = z_offset + thickness
-        layer_edges.append(z_offset)
-
-    return torch.concatenate(z_pieces), segments, layer_ranges, torch.stack(layer_edges), mesh_z_step
-
-
-# S-matrix assembly helpers
-def identity_smatrix(n, dtype_c, device):
-    S11 = torch.eye(n, dtype=dtype_c, device=device)
-    S12 = torch.zeros((n, n), dtype=dtype_c, device=device)
-    S21 = torch.zeros((n, n), dtype=dtype_c, device=device)
-    S22 = torch.eye(n, dtype=dtype_c, device=device)
-    return S11, S12, S21, S22
-
-
-def compose_smatrix(left_smat, right_smat):
-    left11, left12, left21, left22 = left_smat
-    right11, right12, right21, right22 = right_smat
-
-    n = left11.shape[0]
-    eye = torch.eye(n, dtype=left11.dtype, device=left11.device)
-    left12_right21 = torch.matmul(left12, right21)
-    left12_right22 = torch.matmul(left12, right22)
-    lu, pivots = torch.linalg.lu_factor(eye - left12_right21)
-    solved11 = torch.linalg.lu_solve(lu, pivots, left11)
-    solved12 = torch.linalg.lu_solve(lu, pivots, left12_right22)
-
-    right11_solved11 = torch.matmul(right11, solved11)
-    right11_solved12 = torch.matmul(right11, solved12)
-    left22_right21 = torch.matmul(left22, right21)
-    left22_right22 = torch.matmul(left22, right22)
-    left22_right21_solved11 = torch.matmul(left22_right21, solved11)
-    left22_right21_solved12 = torch.matmul(left22_right21, solved12)
-
-    new11 = right11_solved11
-    new12 = right12 + right11_solved12
-    new21 = left21 + left22_right21_solved11
-    new22 = left22_right22 + left22_right21_solved12
-    return new11, new12, new21, new22
-
-
-def make_step_smatrix(l, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
-    lp1 = l + 1
-
-    phi_l = phi_list[l]
-    phi_lp1 = phi_list[lp1]
-    kp_l = kp_list[l]
-    kp_lp1 = kp_list[lp1]
-    q_l = q_list[l]
-    q_lp1 = q_list[lp1]
-
-    Q = torch.linalg.solve(phi_l, phi_lp1)
-    rhs = torch.matmul(kp_lp1, phi_lp1 * (1.0 / q_lp1).reshape(1, -1))
-    P = q_l.reshape(-1, 1) * torch.linalg.solve(torch.matmul(kp_l, phi_l), rhs)
-
-    T11 = 0.5 * (Q + P)
-    T12 = 0.5 * (Q - P)
-
-    phase1 = torch.exp(1j * q_l * thickness_list[l])
-    phase2 = torch.exp(1j * q_lp1 * thickness_list[lp1])
-    d1 = torch.diag(phase1)
-    T12_d2 = T12 * phase2.reshape(1, -1)
-    lu, pivots = torch.linalg.lu_factor(T11)
-    step11 = torch.linalg.lu_solve(lu, pivots, d1)
-    step12 = torch.linalg.lu_solve(lu, pivots, -T12_d2)
-    step21 = torch.matmul(T12, step11)
-    step22 = T11 * phase2.reshape(1, -1) + torch.matmul(T12, step12)
-    return step11.to(dtype=dtype_c), step12.to(dtype=dtype_c), step21.to(dtype=dtype_c), step22.to(dtype=dtype_c)
-
-
-def GetSMatrix(indi, indj, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
-    nG2 = q_list[0].shape[0]
-    device = q_list[0].device
-    if indi == indj:
-        return identity_smatrix(nG2, dtype_c, device)
-    if indi > indj:
-        raise Exception('indi must be < indj')
-
-    smat = identity_smatrix(nG2, dtype_c, device)
-    for l in range(indi, indj):
-        smat = compose_smatrix(
-            smat,
-            make_step_smatrix(l, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c),
-        )
-    return smat
-
-
-def SolveExterior(a0, bN, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
-    Nlayer = len(thickness_list)
-    S11, S12, S21, S22 = GetSMatrix(0, Nlayer - 1, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c)
-    aN = torch.matmul(S11, a0) + torch.matmul(S12, bN)
-    b0 = torch.matmul(S21, a0) + torch.matmul(S22, bN)
-    return aN, b0
-
-
-def SolveInterior(which_layer, a0, bN, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
-    Nlayer = len(thickness_list)
-    nG2 = q_list[0].shape[0]
-    device = q_list[0].device
-
-    S11, S12, _, _ = GetSMatrix(0, which_layer, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c)
-    _, _, pS21, pS22 = GetSMatrix(which_layer, Nlayer - 1, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c)
-
-    rhs = torch.matmul(S11, a0) + torch.matmul(S12, torch.matmul(pS22, bN))
-    ai = torch.linalg.solve(torch.eye(nG2, dtype=dtype_c, device=device) - torch.matmul(S12, pS21), rhs)
-    bi = torch.matmul(pS21, ai) + torch.matmul(pS22, bN)
-    return ai, bi
-
-
-def SolveInteriorCached(which_layer, a0, bN, prefix_smat, suffix_smat, dtype_c=torch.complex128):
-    nG2 = prefix_smat[which_layer][0].shape[0]
-    device = prefix_smat[which_layer][0].device
-
-    S11, S12, _, _ = prefix_smat[which_layer]
-    _, _, pS21, pS22 = suffix_smat[which_layer]
-
-    rhs = torch.matmul(S11, a0) + torch.matmul(S12, torch.matmul(pS22, bN))
-    ai = torch.linalg.solve(torch.eye(nG2, dtype=dtype_c, device=device) - torch.matmul(S12, pS21), rhs)
-    bi = torch.matmul(pS21, ai) + torch.matmul(pS22, bN)
-    return ai, bi
-
+# Public solver object
 
 class obj:
     def __init__(self, nG, L1, L2, freq, theta, phi, verbose=1, device=None, dtype_f=torch.float64, dtype_c=torch.complex128):
@@ -1532,6 +1221,323 @@ class obj:
         )
         return torch.real(Tx), torch.real(Ty), torch.real(Tz)
 
+
+# Internal helpers used by obj
+
+# Lightweight tensor and serialization helpers
+def _clone_nested(value):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        return value.clone()
+    if isinstance(value, tuple):
+        return tuple(_clone_nested(item) for item in value)
+    if isinstance(value, list):
+        return [_clone_nested(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _clone_nested(item) for key, item in value.items()}
+    if isinstance(value, set):
+        return set(value)
+    return copy.deepcopy(value)
+
+
+def _coerce_grid_eps(ep_grid, Nx, Ny, dtype_f, device):
+    if isinstance(ep_grid, (list, tuple)):
+        if len(ep_grid) != 3:
+            raise ValueError('Anisotropic epsilon input must contain exactly three components')
+        out = []
+        for component in ep_grid:
+            tensor = torch.as_tensor(component, dtype=dtype_f, device=device)
+            if tensor.numel() != Nx * Ny:
+                raise ValueError('Each epsilon component must have Nx*Ny entries')
+            out.append(tensor.reshape(Nx, Ny))
+        return out
+
+    tensor = torch.as_tensor(ep_grid, dtype=dtype_f, device=device)
+    if tensor.numel() != Nx * Ny:
+        raise ValueError('Epsilon grid must have Nx*Ny entries')
+    return tensor.reshape(Nx, Ny)
+
+
+def field_coefficients_batched(obj, which_layer, z_offset):
+    """Return stacked Fourier coefficients for Ex,Ey,Ez,Hx,Hy,Hz."""
+    which_layer = obj._validate_layer_index(which_layer)
+    z_tensor = torch.as_tensor(z_offset, dtype=obj.dtype_f, device=obj.device)
+    scalar_input = z_tensor.ndim == 0
+    if scalar_input:
+        z_tensor = z_tensor.reshape(1)
+    ai0, bi0 = obj.GetAmplitudes_noTranslate(which_layer)
+
+    q = obj.q_list[which_layer]
+    phi = obj.phi_list[which_layer]
+    kp = obj.kp_list[which_layer]
+    thickness = torch.as_tensor(obj.thickness_list[which_layer], dtype=obj.dtype_f, device=obj.device)
+
+    dz = z_tensor.reshape(-1, 1)
+    q_row = q.reshape(1, -1)
+    ai = ai0.reshape(1, -1) * torch.exp(1j * q_row * dz)
+    bi = bi0.reshape(1, -1) * torch.exp(1j * q_row * (thickness - dz))
+
+    fhxy = torch.matmul(ai + bi, torch.transpose(phi, 0, 1))
+    fhx = fhxy[:, :obj.nG]
+    fhy = fhxy[:, obj.nG:]
+
+    tmp1 = (ai - bi) / (obj.omega * q_row)
+    tmp2 = torch.matmul(tmp1, torch.transpose(phi, 0, 1))
+    fexy = torch.matmul(tmp2, torch.transpose(kp, 0, 1))
+    fey = -fexy[:, :obj.nG]
+    fex = fexy[:, obj.nG:]
+
+    fhz = (obj.kx.reshape(1, -1) * fey - obj.ky.reshape(1, -1) * fex) / obj.omega
+    fez = (obj.ky.reshape(1, -1) * fhx - obj.kx.reshape(1, -1) * fhy) / obj.omega
+    if obj.id_list[which_layer][0] == 0:
+        fez = fez / obj.Uniform_ep_list[obj.id_list[which_layer][2]]
+    else:
+        epinv = obj.Patterned_epinv_list[obj.id_list[which_layer][2]]
+        fez = torch.matmul(fez, torch.transpose(epinv, 0, 1))
+
+    coeffs = torch.stack((fex, fey, fez, fhx, fhy, fhz), dim=1)
+    return coeffs, scalar_input
+
+
+def get_line_coordinates(obj, axis, coords, fixed_coord, which_layer=None):
+    """
+    Return physical coordinates and reduced coordinates for line cuts.
+
+    If ``which_layer`` is given, the default coordinate count follows that
+    layer's grid shape. Otherwise a structure-wide default count is used.
+    """
+    length_x = torch.linalg.norm(obj.L1)
+    length_y = torch.linalg.norm(obj.L2)
+
+    if coords is None:
+        if not obj._layer_is_axis_aligned():
+            raise ValueError('Auto-generated x/y coordinates are only available for axis-aligned orthogonal lattices')
+
+        if which_layer is not None:
+            Nx, Ny = obj._default_grid_shape(which_layer)
+            count = Nx if axis == 'x' else Ny
+        elif axis == 'x':
+            count = max(shape[0] for shape in obj.GridLayer_Nxy_list) if obj.GridLayer_Nxy_list else max(obj.nG, 64)
+        else:
+            count = max(shape[1] for shape in obj.GridLayer_Nxy_list) if obj.GridLayer_Nxy_list else max(obj.nG, 64)
+
+        if axis == 'x':
+            coords = torch.arange(count, dtype=obj.dtype_f, device=obj.device) / count * obj.L1[0]
+        else:
+            coords = torch.arange(count, dtype=obj.dtype_f, device=obj.device) / count * obj.L2[1]
+
+    coords = torch.as_tensor(coords, dtype=obj.dtype_f, device=obj.device)
+    fixed_coord = torch.as_tensor(fixed_coord, dtype=obj.dtype_f, device=obj.device)
+    if axis == 'x':
+        return coords, coords / length_x, fixed_coord / length_y
+    return coords, coords / length_y, fixed_coord / length_x
+
+
+def build_layer_z_points(obj, thickness, count=None, z_step=None):
+    thickness = torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device)
+
+    if z_step is None:
+        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
+
+    if thickness.item() == 0.0:
+        return torch.zeros((count,), dtype=obj.dtype_f, device=obj.device)
+
+    if thickness.item() <= z_step * (count - 1):
+        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
+
+    local_z = torch.arange(0.0, float(thickness.item()), z_step, dtype=obj.dtype_f, device=obj.device)
+    if local_z.numel() == 0 or not torch.isclose(local_z[0], thickness.new_zeros(())):
+        local_z = thickness.new_zeros((1,))
+
+    if not torch.isclose(local_z[-1], thickness):
+        local_z = torch.concatenate((local_z, thickness.reshape(1)))
+
+    if local_z.numel() < count:
+        return torch.linspace(0.0, thickness, count, dtype=obj.dtype_f, device=obj.device)
+
+    return local_z
+
+
+def build_structure_z_segments(obj, znum=32, z_step=None, duplicate_interfaces=True):
+    if torch.is_tensor(znum):
+        znum = znum.tolist()
+
+    if isinstance(znum, numbers.Integral):
+        min_znum = max(int(znum), 2)
+        if z_step is None:
+            positive_thicknesses = []
+            for thickness in obj.thickness_list:
+                thickness_value = float(torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device).item())
+                if thickness_value > 0.0:
+                    positive_thicknesses.append(thickness_value)
+            if positive_thicknesses and min_znum > 1:
+                mesh_z_step = min(positive_thicknesses) / (min_znum - 1)
+            else:
+                mesh_z_step = None
+            z_counts = None
+        else:
+            mesh_z_step = float(torch.as_tensor(z_step, dtype=obj.dtype_f, device=obj.device).item())
+            if mesh_z_step <= 0.0:
+                raise ValueError('z_step must be positive')
+            z_counts = None
+    else:
+        if z_step is not None:
+            raise ValueError('z_step cannot be combined with a per-layer znum sequence')
+        z_counts = [max(int(value), 2) for value in znum]
+        if len(z_counts) != obj.Layer_N:
+            raise ValueError('znum sequence must have one entry per layer')
+        min_znum = None
+        mesh_z_step = None
+
+    z_pieces = []
+    segments = []
+    layer_ranges = []
+    layer_edges = [torch.zeros((), dtype=obj.dtype_f, device=obj.device)]
+    z_offset = torch.zeros((), dtype=obj.dtype_f, device=obj.device)
+    cursor = 0
+
+    for layer_index, thickness in enumerate(obj.thickness_list):
+        thickness = torch.as_tensor(thickness, dtype=obj.dtype_f, device=obj.device)
+        if z_counts is None:
+            local_z = build_layer_z_points(obj, thickness, count=min_znum, z_step=mesh_z_step)
+        else:
+            local_z = build_layer_z_points(obj, thickness, count=z_counts[layer_index], z_step=None)
+
+        global_z = z_offset + local_z
+        if layer_index > 0 and not duplicate_interfaces:
+            local_z = local_z[1:]
+            global_z = global_z[1:]
+
+        start = cursor
+        stop = cursor + local_z.numel()
+        layer_ranges.append((start, stop))
+        segments.append((layer_index, local_z))
+        z_pieces.append(global_z)
+        cursor = stop
+        z_offset = z_offset + thickness
+        layer_edges.append(z_offset)
+
+    return torch.concatenate(z_pieces), segments, layer_ranges, torch.stack(layer_edges), mesh_z_step
+
+
+# S-matrix assembly helpers
+def identity_smatrix(n, dtype_c, device):
+    S11 = torch.eye(n, dtype=dtype_c, device=device)
+    S12 = torch.zeros((n, n), dtype=dtype_c, device=device)
+    S21 = torch.zeros((n, n), dtype=dtype_c, device=device)
+    S22 = torch.eye(n, dtype=dtype_c, device=device)
+    return S11, S12, S21, S22
+
+
+def compose_smatrix(left_smat, right_smat):
+    left11, left12, left21, left22 = left_smat
+    right11, right12, right21, right22 = right_smat
+
+    n = left11.shape[0]
+    eye = torch.eye(n, dtype=left11.dtype, device=left11.device)
+    left12_right21 = torch.matmul(left12, right21)
+    left12_right22 = torch.matmul(left12, right22)
+    lu, pivots = torch.linalg.lu_factor(eye - left12_right21)
+    solved11 = torch.linalg.lu_solve(lu, pivots, left11)
+    solved12 = torch.linalg.lu_solve(lu, pivots, left12_right22)
+
+    right11_solved11 = torch.matmul(right11, solved11)
+    right11_solved12 = torch.matmul(right11, solved12)
+    left22_right21 = torch.matmul(left22, right21)
+    left22_right22 = torch.matmul(left22, right22)
+    left22_right21_solved11 = torch.matmul(left22_right21, solved11)
+    left22_right21_solved12 = torch.matmul(left22_right21, solved12)
+
+    new11 = right11_solved11
+    new12 = right12 + right11_solved12
+    new21 = left21 + left22_right21_solved11
+    new22 = left22_right22 + left22_right21_solved12
+    return new11, new12, new21, new22
+
+
+def make_step_smatrix(l, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
+    lp1 = l + 1
+
+    phi_l = phi_list[l]
+    phi_lp1 = phi_list[lp1]
+    kp_l = kp_list[l]
+    kp_lp1 = kp_list[lp1]
+    q_l = q_list[l]
+    q_lp1 = q_list[lp1]
+
+    Q = torch.linalg.solve(phi_l, phi_lp1)
+    rhs = torch.matmul(kp_lp1, phi_lp1 * (1.0 / q_lp1).reshape(1, -1))
+    P = q_l.reshape(-1, 1) * torch.linalg.solve(torch.matmul(kp_l, phi_l), rhs)
+
+    T11 = 0.5 * (Q + P)
+    T12 = 0.5 * (Q - P)
+
+    phase1 = torch.exp(1j * q_l * thickness_list[l])
+    phase2 = torch.exp(1j * q_lp1 * thickness_list[lp1])
+    d1 = torch.diag(phase1)
+    T12_d2 = T12 * phase2.reshape(1, -1)
+    lu, pivots = torch.linalg.lu_factor(T11)
+    step11 = torch.linalg.lu_solve(lu, pivots, d1)
+    step12 = torch.linalg.lu_solve(lu, pivots, -T12_d2)
+    step21 = torch.matmul(T12, step11)
+    step22 = T11 * phase2.reshape(1, -1) + torch.matmul(T12, step12)
+    return step11.to(dtype=dtype_c), step12.to(dtype=dtype_c), step21.to(dtype=dtype_c), step22.to(dtype=dtype_c)
+
+
+def GetSMatrix(indi, indj, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
+    nG2 = q_list[0].shape[0]
+    device = q_list[0].device
+    if indi == indj:
+        return identity_smatrix(nG2, dtype_c, device)
+    if indi > indj:
+        raise Exception('indi must be < indj')
+
+    smat = identity_smatrix(nG2, dtype_c, device)
+    for l in range(indi, indj):
+        smat = compose_smatrix(
+            smat,
+            make_step_smatrix(l, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c),
+        )
+    return smat
+
+
+def SolveExterior(a0, bN, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
+    Nlayer = len(thickness_list)
+    S11, S12, S21, S22 = GetSMatrix(0, Nlayer - 1, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c)
+    aN = torch.matmul(S11, a0) + torch.matmul(S12, bN)
+    b0 = torch.matmul(S21, a0) + torch.matmul(S22, bN)
+    return aN, b0
+
+
+def SolveInterior(which_layer, a0, bN, q_list, phi_list, kp_list, thickness_list, dtype_c=torch.complex128):
+    Nlayer = len(thickness_list)
+    nG2 = q_list[0].shape[0]
+    device = q_list[0].device
+
+    S11, S12, _, _ = GetSMatrix(0, which_layer, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c)
+    _, _, pS21, pS22 = GetSMatrix(which_layer, Nlayer - 1, q_list, phi_list, kp_list, thickness_list, dtype_c=dtype_c)
+
+    rhs = torch.matmul(S11, a0) + torch.matmul(S12, torch.matmul(pS22, bN))
+    ai = torch.linalg.solve(torch.eye(nG2, dtype=dtype_c, device=device) - torch.matmul(S12, pS21), rhs)
+    bi = torch.matmul(pS21, ai) + torch.matmul(pS22, bN)
+    return ai, bi
+
+
+def SolveInteriorCached(which_layer, a0, bN, prefix_smat, suffix_smat, dtype_c=torch.complex128):
+    nG2 = prefix_smat[which_layer][0].shape[0]
+    device = prefix_smat[which_layer][0].device
+
+    S11, S12, _, _ = prefix_smat[which_layer]
+    _, _, pS21, pS22 = suffix_smat[which_layer]
+
+    rhs = torch.matmul(S11, a0) + torch.matmul(S12, torch.matmul(pS22, bN))
+    ai = torch.linalg.solve(torch.eye(nG2, dtype=dtype_c, device=device) - torch.matmul(S12, pS21), rhs)
+    bi = torch.matmul(pS21, ai) + torch.matmul(pS22, bN)
+    return ai, bi
+
+
+# Low-level RCWA kernels
 
 def MakeKPMatrix(omega, layer_type, epinv, kx, ky, dtype_c=torch.complex128):
     nG = len(kx)
