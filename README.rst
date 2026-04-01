@@ -177,6 +177,12 @@ Quick Start
 		     # solve for R and T
 		     R,T= obj.RT_Solve(normalize=1)
 
+  Here ``normalize=1`` uses the actual incident Poynting flux of the
+  current excitation. This is more robust than a fixed ``n/cos(theta)``
+  factor when amplitudes are rescaled or the incident medium is lossy.
+  ``obj.normalization`` now stores this same incident-power value, so the
+  attribute and the runtime normalization path stay consistent.
+
 * Example 3: topology optimization of reflection of a single patterned layer, `ex3.py <./example/ex3.py>`_
 
 * Example 4: transmission and reflection (sum or by order) of a hexagonal lattice of a hole: `ex4.py <./example/ex4.py>`_
@@ -224,10 +230,83 @@ Fast-path notes
 
   To post-process absorption from user-supplied Im(eps) patterns::
 
-    abs_layer = obj.Solve_AbsorptionLayer(which_layer, imag_eps_grid, min_znum=5)
-    abs_z = obj.Solve_AbsorptionLayerZ(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
-    abs_xy = obj.Solve_AbsorptionLayerXY(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
-    abs_all = obj.Solve_Absorption({1: imag_eps_grid1, 3: imag_eps_grid2}, min_znum=5)
+    abs_3d = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2],
+                                       z_step=0.01, z_offset=0.0, z_min=5)
+    abs_z = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2],
+                                      z_step=0.01, z_offset=0.0, z_min=5, avg='XY')
+    abs_xy = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2],
+                                       z_step=0.01, z_offset=0.0, z_min=5, avg='Z')
+    layer_list = [1, 3]
+    pattern_list = [
+        [layer1_imag_eps_a, layer1_imag_eps_b],  # patterns for layer 1
+        [layer3_imag_eps_a],                     # patterns for layer 3
+    ]
+    abs_all = obj.Solve_Absorption(layer_list, pattern_list,
+                                   z_step=0.01, z_min=5, avg='XY')
+    abs_tot = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2],
+                                        z_step=0.01, z_offset=0.0, z_min=5, avg='tot')
+
+  `Solve_AbsorptionLayer` returns one clean structure:
+  ``absorption`` for the requested average mode, ``pattern_absorption`` as a
+  list for each input pattern, and ``total`` as the integrated absorption.
+  In `Solve_Absorption(layer_list, pattern_list, ...)`, the outer list follows
+  the same order as `layer_list`, so each layer can use a different grid shape.
+
+Root helper packages
+--------------------
+
+This fork also provides two lightweight root-level helper packages outside
+`grcwa/`.
+
+* `patterns/`
+
+  Use reusable geometry builders and flatten the result directly into
+  `GridLayer_geteps(...)`::
+
+    from patterns import pattern_xx, nm
+    import torch
+
+    pat = pattern_xx(
+        size_x=400 * nm, size_y=400 * nm,
+        Nx=128, Ny=128,
+        lamb0=1550 * nm, CRA=0.0, azimuth=0.0,
+        eps_bg=1.0, eps_obj=3.48**2,
+        radius=90 * nm,
+        dtype_f=torch.float64, dtype_c=torch.complex128,
+        device='cpu',
+    )
+    obj.GridLayer_geteps(pat.flatten())
+
+  For multiple patterned layers, concatenate the flattened tensors::
+
+    obj.GridLayer_geteps(torch.cat([pat1.flatten(), pat2.flatten()]))
+
+* `materials/`
+
+  Use the current wavelength as the default query point and access
+  tabulated data by material/deck name::
+
+    from materials import material
+    import torch
+
+    mat = material(
+        1550e-9,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+        device='cpu',
+    )
+    eps_sio2 = mat.eps_SiO2_xx()
+    eps_old = mat.eps_SiO2_xx(filename='SiO2_index.txt')
+
+  Rules:
+
+  - files use `WL n k` format
+  - `WL` is interpreted in `nm`
+  - query wavelengths are interpreted in `m`
+  - `n` and `k` use linear interpolation with end-segment extrapolation
+  - `eps = (n + i k)^2`
+  - if both `SiO2_index.txt` and dated files such as
+    `SiO2_index_260401.txt` exist, the latest dated file is used by default
 
 * Replace a single grid layer and update only the affected scattering cache::
 

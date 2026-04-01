@@ -56,8 +56,13 @@ To define incidence light other than planewave::
   obj.bN = ... # backward, each have a length 2*obj.nG, for the 2 lateral directions
   
 To normalize output when the 0-th media is not vacuum, or for oblique incidence::
-  
+
   R, T = obj.RT_Solve(normalize = 1)
+
+``normalize=1`` now divides by the actual incident flux of the current
+excitation, so it stays consistent when amplitudes change or the incident
+medium is lossy.
+The same value is stored in ``obj.normalization`` for direct inspection.
 
 To get Poynting flux by order::
   
@@ -129,12 +134,63 @@ To compute Maxwell stress tensor, integrated over the *z*-plane::
 
 To estimate absorption from user-supplied Im(eps) patterns in real space::
 
-  abs_layer = obj.Solve_AbsorptionLayer(which_layer, imag_eps_grid, min_znum=5)
-  abs_z = obj.Solve_AbsorptionLayerZ(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
-  abs_xy = obj.Solve_AbsorptionLayerXY(which_layer, imag_eps_grid, min_znum=5, z_step=0.01)
-  abs_all = obj.Solve_Absorption({1: imag_eps_grid1, 3: imag_eps_grid2}, min_znum=5)
+  abs_3d = obj.Solve_AbsorptionLayer(which_layer,[imag_eps_grid1,imag_eps_grid2],z_step=0.01,z_offset=0.0,z_min=5)
+  abs_z = obj.Solve_AbsorptionLayer(which_layer,[imag_eps_grid1,imag_eps_grid2],z_step=0.01,z_offset=0.0,z_min=5,avg='XY')
+  abs_xy = obj.Solve_AbsorptionLayer(which_layer,[imag_eps_grid1,imag_eps_grid2],z_step=0.01,z_offset=0.0,z_min=5,avg='Z')
+  layer_list = [1,3]
+  pattern_list = [
+      [layer1_imag_eps_a, layer1_imag_eps_b],  # patterns for layer 1
+      [layer3_imag_eps_a],                     # patterns for layer 3
+  ]
+  abs_all = obj.Solve_Absorption(layer_list,pattern_list,z_step=0.01,z_min=5,avg='XY')
+  abs_tot = obj.Solve_AbsorptionLayer(which_layer,[imag_eps_grid1,imag_eps_grid2],z_step=0.01,z_offset=0.0,z_min=5,avg='tot')
 
-  # imag_eps_grid can be an arbitrary Nx x Ny tensor for isotropic loss
-  # or a length-3 tuple/list of Nx x Ny tensors for diagonal anisotropic loss
-  # one layer can also receive multiple named patterns as a dict, e.g. {'core': grid1, 'clad': grid2}
-  # Solve_AbsorptionLayerZ returns absorption_z, Solve_AbsorptionLayerXY returns absorption_xy
+  # Solve_AbsorptionLayer returns:
+  # result['absorption']         -> 3D / z-profile / xy-map depending on avg
+  # result['pattern_absorption'] -> one output per input pattern
+  # result['pattern_total']      -> one scalar per input pattern
+  # result['total']              -> integrated absorption
+  # In Solve_Absorption(layer_list, pattern_list, ...), the outer list follows
+  # layer_list order, so each layer can use a different grid shape
+
+To build epsilon grids with the root-level `patterns/` helpers::
+
+  from patterns import pattern_xx, nm
+  import torch
+
+  pat = pattern_xx(
+      size_x=400 * nm, size_y=400 * nm,
+      Nx=128, Ny=128,
+      lamb0=1550 * nm, CRA=0.0, azimuth=0.0,
+      eps_bg=1.0, eps_obj=3.48**2,
+      radius=90 * nm,
+      dtype_f=torch.float64, dtype_c=torch.complex128,
+      device='cpu',
+  )
+  obj.GridLayer_geteps(pat.flatten())
+
+  # multiple patterned layers
+  obj.GridLayer_geteps(torch.cat([pat1.flatten(), pat2.flatten()]))
+
+To read tabulated optical constants with the root-level `materials/` helper::
+
+  from materials import material
+  import torch
+
+  mat = material(
+      1550e-9,
+      dtype_f=torch.float64,
+      dtype_c=torch.complex128,
+      device='cpu',
+  )
+  eps_sio2 = mat.eps_SiO2_xx()
+  eps_old = mat.eps_SiO2_xx(filename='SiO2_index.txt')
+
+Rules:
+
+- files use `WL n k`
+- `WL` is interpreted in `nm`
+- query wavelengths are interpreted in `m`
+- `n` and `k` use linear interpolation with end-segment extrapolation
+- `eps = (n + i k)^2`
+- dated files such as `SiO2_index_260401.txt` override `SiO2_index.txt` by default

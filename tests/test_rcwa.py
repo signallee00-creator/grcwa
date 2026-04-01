@@ -327,7 +327,7 @@ def test_absorption_layer_z_matches_direct_field_sum():
     obj, base_grids = rcwa_small_assembly()
     loss_grid = torch.where(base_grids[1] > 2.0, 0.04, 0.01)
 
-    result = obj.Solve_AbsorptionLayerZ(1, loss_grid, min_znum=5, normalize=0)
+    result = obj.Solve_AbsorptionLayer(1, loss_grid, min_znum=5, avg='XY', normalize=0)
 
     z_coords = result['z_coords']
     field, _ = obj.Solve_FieldXY(1, z_coords, Nxy=loss_grid.shape, components=('Ex', 'Ey', 'Ez'))
@@ -336,10 +336,10 @@ def test_absorption_layer_z_matches_direct_field_sum():
     )
     cell_area = torch.abs(obj.L1[0] * obj.L2[1] - obj.L1[1] * obj.L2[0]) * obj.Pscale ** 2
     dA = cell_area / (loss_grid.shape[0] * loss_grid.shape[1])
-    expected_z = 0.5 * torch.real(obj.omega).to(dtype=obj.dtype_f) * dA * torch.sum(e2_loss, dim=(-2, -1))
+    expected_z = torch.real(obj.omega).to(dtype=obj.dtype_f) * dA * torch.sum(e2_loss, dim=(-2, -1))
     expected_total = torch.trapz(expected_z, z_coords)
 
-    _assert_close(result['absorption_z'], expected_z)
+    _assert_close(result['absorption'], expected_z)
     _assert_close(result['total'], expected_total)
 
 
@@ -347,11 +347,11 @@ def test_absorption_layer_xy_matches_direct_field_sum():
     obj, base_grids = rcwa_small_assembly()
     loss_grid = torch.where(base_grids[1] > 2.0, 0.04, 0.01)
 
-    result = obj.Solve_AbsorptionLayerXY(1, loss_grid, min_znum=5, normalize=0)
+    result = obj.Solve_AbsorptionLayer(1, loss_grid, min_znum=5, avg='Z', normalize=0)
 
     z_coords = build_layer_z_points(obj, obj.thickness_list[1], count=5, z_step=None)
     field, _ = obj.Solve_FieldXY(1, z_coords, Nxy=loss_grid.shape, components=('Ex', 'Ey', 'Ez'))
-    density = 0.5 * torch.real(obj.omega).to(dtype=obj.dtype_f) * loss_grid.unsqueeze(0) * (
+    density = torch.real(obj.omega).to(dtype=obj.dtype_f) * loss_grid.unsqueeze(0) * (
         torch.abs(field[0]) ** 2 + torch.abs(field[1]) ** 2 + torch.abs(field[2]) ** 2
     )
     expected_xy = torch.trapz(density, z_coords, dim=0)
@@ -359,7 +359,7 @@ def test_absorption_layer_xy_matches_direct_field_sum():
     dA = cell_area / (loss_grid.shape[0] * loss_grid.shape[1])
     expected_total = dA * torch.sum(expected_xy)
 
-    _assert_close(result['absorption_xy'], expected_xy)
+    _assert_close(result['absorption'], expected_xy)
     _assert_close(result['total'], expected_total)
 
 
@@ -369,14 +369,287 @@ def test_absorption_multiple_patterns_and_layers_sum():
     loss1b = torch.where(base_grids[1] <= 2.0, 0.01, 0.00)
     loss3 = torch.where(base_grids[3] > 3.0, 0.02, 0.01)
 
-    layer1 = obj.Solve_AbsorptionLayerZ(1, {'core': loss1a, 'clad': loss1b}, min_znum=5)
-    layer3 = obj.Solve_AbsorptionLayerZ(3, loss3, min_znum=5)
+    layer1 = obj.Solve_AbsorptionLayer(1, {'core': loss1a, 'clad': loss1b}, min_znum=5, avg='XY')
+    layer3 = obj.Solve_AbsorptionLayer(3, loss3, min_znum=5, avg='XY')
     total = obj.Solve_Absorption({1: {'core': loss1a, 'clad': loss1b}, 3: loss3}, min_znum=5)
 
-    _assert_close(layer1['total'], layer1['per_pattern']['core']['total'] + layer1['per_pattern']['clad']['total'])
+    _assert_close(layer1['total'], layer1['pattern_total'][0] + layer1['pattern_total'][1])
     _assert_close(total['per_layer'][1], layer1['total'])
     _assert_close(total['per_layer'][3], layer3['total'])
     _assert_close(total['total'], layer1['total'] + layer3['total'])
+
+
+def test_absorption_layer_core_avg_matches_wrappers():
+    obj, base_grids = rcwa_small_assembly()
+    loss1a = torch.where(base_grids[1] > 2.0, 0.03, 0.00)
+    loss1b = torch.where(base_grids[1] <= 2.0, 0.01, 0.00)
+
+    core_z = obj.Solve_AbsorptionLayer(1, [loss1a, loss1b], z_min=5, avg='XY')
+    core_xy = obj.Solve_AbsorptionLayer(1, [loss1a, loss1b], z_min=5, avg='Z')
+    _assert_close(core_z['pattern_total'][0] + core_z['pattern_total'][1], core_z['total'])
+    _assert_close(core_xy['pattern_total'][0] + core_xy['pattern_total'][1], core_xy['total'])
+
+
+def test_absorption_layer_z_step_and_offset_falls_back_to_z_min():
+    obj, base_grids = rcwa_small_assembly()
+    loss_grid = torch.where(base_grids[1] > 2.0, 0.04, 0.01)
+
+    result = obj.Solve_AbsorptionLayer(1, [loss_grid], z_step=1.0, z_offset=0.2, z_min=5, avg='XY')
+    assert result['z_coords'].numel() == 5
+    _assert_close(result['z_coords'][0], torch.zeros((), dtype=obj.dtype_f))
+    _assert_close(result['z_coords'][-1], torch.as_tensor(obj.thickness_list[1], dtype=obj.dtype_f))
+
+
+def test_absorption_list_api_uses_layer_function():
+    obj, base_grids = rcwa_small_assembly()
+    loss1a = torch.where(base_grids[1] > 2.0, 0.03, 0.00)
+    loss1b = torch.where(base_grids[1] <= 2.0, 0.01, 0.00)
+    loss3 = torch.where(base_grids[3] > 3.0, 0.02, 0.01)
+
+    result = obj.Solve_Absorption([1, 3], [[loss1a, loss1b], [loss3]], z_min=5, avg='XY')
+    layer1 = obj.Solve_AbsorptionLayer(1, [loss1a, loss1b], z_min=5, avg='XY')
+    layer3 = obj.Solve_AbsorptionLayer(3, [loss3], z_min=5, avg='XY')
+
+    _assert_close(result['layer_total'][0], layer1['total'])
+    _assert_close(result['layer_total'][1], layer3['total'])
+    _assert_close(result['per_layer'][0]['absorption'], layer1['absorption'])
+    _assert_close(result['per_layer'][1]['absorption'], layer3['absorption'])
+    _assert_close(result['total'], layer1['total'] + layer3['total'])
+
+
+def test_absorption_tot_mode_returns_scalar_totals():
+    obj, base_grids = rcwa_small_assembly()
+    loss1 = torch.where(base_grids[1] > 2.0, 0.03, 0.00)
+    loss2 = torch.where(base_grids[1] <= 2.0, 0.01, 0.00)
+
+    result = obj.Solve_AbsorptionLayer(1, [loss1, loss2], z_min=5, avg='tot')
+    ref = obj.Solve_AbsorptionLayer(1, [loss1, loss2], z_min=5, avg='XY')
+
+    assert result['absorption'].ndim == 0
+    assert result['pattern_absorption'][0].ndim == 0
+    assert result['pattern_absorption'][1].ndim == 0
+    _assert_close(result['total'], ref['total'])
+    _assert_close(result['absorption'], ref['total'])
+    _assert_close(result['pattern_total'][0] + result['pattern_total'][1], result['total'])
+
+
+def test_absorption_matches_one_minus_rt_for_uniform_lossy_slab():
+    obj = grcwa.obj(
+        9,
+        [1.0, 0.0],
+        [0.0, 1.0],
+        1.0,
+        0.1,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj.Add_LayerUniform(0.1, 1.0)
+    obj.Add_LayerUniform(0.3, 2.0 + 0.2j)
+    obj.Add_LayerUniform(0.1, 1.0)
+    obj.Init_Setup()
+    obj.MakeExcitationPlanewave(0.0, 0.0, 1.0, 0.0, order=0, direction='forward')
+
+    R, T = obj.RT_Solve(normalize=1)
+    A_expected = 1.0 - R - T
+
+    loss_grid = torch.full((32, 32), 0.2, dtype=torch.float64)
+    A_calc = obj.Solve_AbsorptionLayer(1, [loss_grid], z_step=0.07, z_offset=0.02, z_min=5, avg='tot', normalize=1)
+
+    _assert_close(A_calc['total'], A_expected, atol=5e-3, rtol=5e-3)
+
+
+def test_normalized_rt_and_absorption_are_amplitude_invariant():
+    obj1 = grcwa.obj(
+        41,
+        [0.2, 0.0],
+        [0.0, 0.2],
+        1.0,
+        torch.pi / 10,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj1.Add_LayerUniform(0.1, 2.0)
+    obj1.Add_LayerGrid(0.2, 18, 14)
+    obj1.Add_LayerUniform(0.15, 1.5)
+    obj1.Init_Setup()
+
+    x = torch.linspace(0.0, 1.0, 18, dtype=torch.float64)
+    y = torch.linspace(0.0, 1.0, 14, dtype=torch.float64)
+    xx, yy = torch.meshgrid(x, y, indexing='ij')
+    grid = torch.ones((18, 14), dtype=torch.float64) * 3.0
+    grid[((xx - 0.5) ** 2 + (yy - 0.5) ** 2) < 0.12] = 1.0
+    obj1.GridLayer_geteps(grid)
+    obj1.MakeExcitationPlanewave(0.0, 0.0, 1.0, 0.0, order=0, direction='forward')
+
+    obj2 = grcwa.obj(
+        41,
+        [0.2, 0.0],
+        [0.0, 0.2],
+        1.0,
+        torch.pi / 10,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj2.Add_LayerUniform(0.1, 2.0)
+    obj2.Add_LayerGrid(0.2, 18, 14)
+    obj2.Add_LayerUniform(0.15, 1.5)
+    obj2.Init_Setup()
+    obj2.GridLayer_geteps(grid)
+    obj2.MakeExcitationPlanewave(0.0, 0.0, 2.0, 0.0, order=0, direction='forward')
+
+    loss_grid = torch.where(grid > 2.0, 0.04, 0.01)
+    R1, T1 = obj1.RT_Solve(normalize=1)
+    R2, T2 = obj2.RT_Solve(normalize=1)
+    A1 = obj1.Solve_AbsorptionLayer(1, [loss_grid], z_min=5, avg='tot', normalize=1)['total']
+    A2 = obj2.Solve_AbsorptionLayer(1, [loss_grid], z_min=5, avg='tot', normalize=1)['total']
+
+    _assert_close(R1, R2, atol=1e-8, rtol=1e-8)
+    _assert_close(T1, T2, atol=1e-8, rtol=1e-8)
+    _assert_close(A1, A2, atol=1e-8, rtol=1e-8)
+
+
+def test_normalized_rt_is_finite_for_lossy_incident_medium():
+    obj = grcwa.obj(
+        9,
+        [1.0, 0.0],
+        [0.0, 1.0],
+        1.0,
+        0.1,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj.Add_LayerUniform(0.1, 1.2 + 0.05j)
+    obj.Add_LayerUniform(0.3, 2.0 + 0.2j)
+    obj.Add_LayerUniform(0.1, 1.0)
+    obj.Init_Setup()
+    obj.MakeExcitationPlanewave(0.0, 0.0, 1.0, 0.0, order=0, direction='forward')
+
+    R, T = obj.RT_Solve(normalize=1)
+    assert torch.isfinite(R)
+    assert torch.isfinite(T)
+
+
+def test_self_normalization_tracks_current_incident_power():
+    obj = grcwa.obj(
+        21,
+        [0.3, 0.0],
+        [0.0, 0.3],
+        1.0,
+        0.2,
+        0.1,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj.Add_LayerUniform(0.1, 1.3 + 0.05j)
+    obj.Add_LayerUniform(0.2, 2.0 + 0.2j)
+    obj.Add_LayerUniform(0.1, 1.1)
+    obj.Init_Setup()
+
+    assert obj.normalization is None
+
+    obj.MakeExcitationPlanewave(0.5, 0.0, 0.25, 0.3, order=0, direction='forward')
+    norm_forward = obj.normalization
+    assert norm_forward > 0
+    _assert_close(norm_forward, obj._incident_power())
+
+    obj.MakeExcitationPlanewave(1.0, 0.0, 0.5, 0.3, order=0, direction='forward')
+    _assert_close(obj.normalization, 4.0 * norm_forward, atol=1e-8, rtol=1e-8)
+    _assert_close(obj.normalization, obj._incident_power())
+
+    obj.MakeExcitationPlanewave(0.7, 0.1, 0.2, 0.0, order=0, direction='backward')
+    assert obj.normalization is not None
+    assert obj.normalization > 0
+    _assert_close(obj.normalization, obj._incident_power())
+
+
+def test_backward_absorption_matches_one_minus_rt_for_uniform_lossy_slab():
+    obj = grcwa.obj(
+        9,
+        [1.0, 0.0],
+        [0.0, 1.0],
+        1.0,
+        0.1,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj.Add_LayerUniform(0.1, 1.0)
+    obj.Add_LayerUniform(0.3, 2.0 + 0.2j)
+    obj.Add_LayerUniform(0.1, 1.0)
+    obj.Init_Setup()
+    obj.MakeExcitationPlanewave(0.0, 0.0, 1.0, 0.0, order=0, direction='backward')
+
+    R, T = obj.RT_Solve(normalize=1)
+    A_expected = 1.0 - R - T
+
+    loss_grid = torch.full((32, 32), 0.2, dtype=torch.float64)
+    A_calc = obj.Solve_AbsorptionLayer(1, [loss_grid], z_step=0.02, z_offset=0.02, z_min=5, avg='tot', normalize=1)
+
+    _assert_close(A_calc['total'], A_expected, atol=1e-3, rtol=1e-3)
+
+
+def test_backward_normalized_rt_and_absorption_are_amplitude_invariant():
+    obj1 = grcwa.obj(
+        41,
+        [0.2, 0.0],
+        [0.0, 0.2],
+        1.0,
+        torch.pi / 10,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj1.Add_LayerUniform(0.1, 2.0)
+    obj1.Add_LayerGrid(0.2, 18, 14)
+    obj1.Add_LayerUniform(0.15, 1.5)
+    obj1.Init_Setup()
+
+    x = torch.linspace(0.0, 1.0, 18, dtype=torch.float64)
+    y = torch.linspace(0.0, 1.0, 14, dtype=torch.float64)
+    xx, yy = torch.meshgrid(x, y, indexing='ij')
+    grid = torch.ones((18, 14), dtype=torch.float64) * 3.0
+    grid[((xx - 0.5) ** 2 + (yy - 0.5) ** 2) < 0.12] = 1.0
+    obj1.GridLayer_geteps(grid)
+    obj1.MakeExcitationPlanewave(0.0, 0.0, 1.0, 0.0, order=0, direction='backward')
+
+    obj2 = grcwa.obj(
+        41,
+        [0.2, 0.0],
+        [0.0, 0.2],
+        1.0,
+        torch.pi / 10,
+        0.0,
+        verbose=0,
+        dtype_f=torch.float64,
+        dtype_c=torch.complex128,
+    )
+    obj2.Add_LayerUniform(0.1, 2.0)
+    obj2.Add_LayerGrid(0.2, 18, 14)
+    obj2.Add_LayerUniform(0.15, 1.5)
+    obj2.Init_Setup()
+    obj2.GridLayer_geteps(grid)
+    obj2.MakeExcitationPlanewave(0.0, 0.0, 2.0, 0.0, order=0, direction='backward')
+
+    loss_grid = torch.where(grid > 2.0, 0.04, 0.01)
+    R1, T1 = obj1.RT_Solve(normalize=1)
+    R2, T2 = obj2.RT_Solve(normalize=1)
+    A1 = obj1.Solve_AbsorptionLayer(1, [loss_grid], z_min=5, avg='tot', normalize=1)['total']
+    A2 = obj2.Solve_AbsorptionLayer(1, [loss_grid], z_min=5, avg='tot', normalize=1)['total']
+
+    _assert_close(R1, R2, atol=1e-8, rtol=1e-8)
+    _assert_close(T1, T2, atol=1e-8, rtol=1e-8)
+    _assert_close(A1, A2, atol=1e-8, rtol=1e-8)
 
 
 def test_field_component_selection_and_new_views(tmp_path):

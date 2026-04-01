@@ -70,6 +70,7 @@ class obj:
         self._amplitude_cache_ready = False
         self._layer_amplitudes = None
         self._amplitude_cache_info = None
+        self.normalization = None
 
     @property
     def a0(self):
@@ -80,6 +81,7 @@ class obj:
         if value is None:
             self._a0 = None
             self._invalidate_excitation_caches()
+            self._refresh_normalization()
             return
 
         tensor = torch.as_tensor(value, dtype=self.dtype_c, device=self.device)
@@ -87,6 +89,7 @@ class obj:
             raise ValueError('a0 must have length 2*self.nG')
         self._a0 = tensor.reshape(-1)
         self._invalidate_excitation_caches()
+        self._refresh_normalization()
 
     @property
     def bN(self):
@@ -97,6 +100,7 @@ class obj:
         if value is None:
             self._bN = None
             self._invalidate_excitation_caches()
+            self._refresh_normalization()
             return
 
         tensor = torch.as_tensor(value, dtype=self.dtype_c, device=self.device)
@@ -104,6 +108,7 @@ class obj:
             raise ValueError('bN must have length 2*self.nG')
         self._bN = tensor.reshape(-1)
         self._invalidate_excitation_caches()
+        self._refresh_normalization()
 
     def _invalidate_excitation_caches(self):
         self._exterior_cache = None
@@ -115,6 +120,7 @@ class obj:
         self._smat_cache_ready = False
         self._prefix_smat = None
         self._suffix_smat = None
+        self.normalization = None
         if clear_dirty:
             self._dirty_layers = set()
         self._invalidate_excitation_caches()
@@ -127,6 +133,32 @@ class obj:
         self._ensure_setup_ready()
         if self.a0 is None or self.bN is None:
             raise RuntimeError('Define an excitation with MakeExcitationPlanewave() or by setting a0/bN')
+
+    def _compute_incident_power(self):
+        if self.direction == 'forward':
+            zeros = torch.zeros_like(self.a0)
+            forward, _ = GetZPoyntingFlux(self.a0, zeros, self.omega, self.kp_list[0], self.phi_list[0], self.q_list[0], byorder=0)
+            return torch.abs(torch.real(forward)).to(dtype=self.dtype_f)
+
+        if self.direction == 'backward':
+            zeros = torch.zeros_like(self.bN)
+            _, backward = GetZPoyntingFlux(zeros, self.bN, self.omega, self.kp_list[-1], self.phi_list[-1], self.q_list[-1], byorder=0)
+            return torch.abs(torch.real(backward)).to(dtype=self.dtype_f)
+
+        raise ValueError('Unknown excitation direction')
+
+    def _refresh_normalization(self):
+        if not self.setup_ready or self.direction is None or self.a0 is None or self.bN is None:
+            self.normalization = None
+            return
+
+        self.normalization = self._compute_incident_power()
+
+    def _incident_power(self):
+        self._ensure_excitation_ready()
+        if self.normalization is None:
+            self._refresh_normalization()
+        return self.normalization
 
     def _validate_layer_index(self, which_layer):
         which_layer = int(which_layer)
@@ -231,7 +263,6 @@ class obj:
         self.Lk2 = self.Lk2 / self.Pscale
         self.kx, self.ky = Lattice_SetKs(self.G, kx0, ky0, self.Lk1, self.Lk2)
 
-        self.normalization = torch.real(torch.sqrt(ep0)).to(dtype=self.dtype_f) / torch.cos(self.theta)
         self.setup_ready = True
 
         if self.verbose > 0:
@@ -347,6 +378,8 @@ class obj:
         self._apply_grid_layer_eps(which_layer, ep_grid)
         self._dirty_layers.add(which_layer)
         self._invalidate_excitation_caches()
+        if which_layer == 0 or which_layer == self.Layer_N - 1:
+            self._refresh_normalization()
 
         if update_cache:
             self.UpdateSMatrixCache([which_layer])
@@ -491,8 +524,9 @@ class obj:
             raise ValueError('Unknown excitation direction')
 
         if normalize == 1:
-            R = R * self.normalization
-            T = T * self.normalization
+            incident_power = self._incident_power()
+            R = R / incident_power
+            T = T / incident_power
         return R, T
 
     def GetAmplitudes_noTranslate(self, which_layer):
@@ -826,7 +860,7 @@ class obj:
         restored.Lk2 = runtime['Lk2']
         restored.kx = runtime['kx']
         restored.ky = runtime['ky']
-        restored.normalization = runtime['normalization']
+        restored.normalization = None
         restored.kp_list = runtime['kp_list']
         restored.q_list = runtime['q_list']
         restored.phi_list = runtime['phi_list']
@@ -841,6 +875,7 @@ class obj:
             restored.a0 = runtime['a0']
         if runtime['bN'] is not None:
             restored.bN = runtime['bN']
+        restored._refresh_normalization()
 
         if restore_caches and 'caches' in state:
             caches = state['caches']
@@ -954,8 +989,13 @@ class obj:
 
     # Derived post-processing
 
-    def _solve_absorption_density(self, which_layer, eps_imag, min_znum=2, z_step=None, Nxy=None):
+    def Solve_AbsorptionLayer(self, which_layer, pattern_list, z_step=None, z_offset=0.0, z_min=2, Nxy=None, avg=None, normalize=0, min_znum=None):
         which_layer = self._validate_layer_index(which_layer)
+        if min_znum is not None:
+            z_min = min_znum
+        if isinstance(avg, str):
+            avg = avg.lower()
+
         if Nxy is not None:
             Nx, Ny = int(Nxy[0]), int(Nxy[1])
         elif self.id_list[which_layer][0] == 1:
@@ -963,12 +1003,11 @@ class obj:
             Nx = int(Nx)
             Ny = int(Ny)
         else:
-            sample = eps_imag
+            sample = pattern_list
             if isinstance(sample, dict):
                 sample = next(iter(sample.values()))
-            if isinstance(sample, (list, tuple)) and len(sample) == 3:
+            if isinstance(sample, (list, tuple)) and len(sample) > 0:
                 sample = sample[0]
-
             sample = torch.as_tensor(sample, device=self.device)
             if sample.ndim == 2:
                 Nx, Ny = int(sample.shape[0]), int(sample.shape[1])
@@ -979,166 +1018,173 @@ class obj:
                 Nx = max(self.nG, 64)
                 Ny = max(self.nG, 64)
 
-        def to_grid(component):
-            tensor = torch.as_tensor(component, device=self.device)
+        if isinstance(pattern_list, dict):
+            pattern_names = [str(name) for name in pattern_list.keys()]
+            pattern_list = list(pattern_list.values())
+        elif isinstance(pattern_list, (list, tuple)):
+            pattern_names = [str(i) for i in range(len(pattern_list))]
+            pattern_list = list(pattern_list)
+        else:
+            pattern_names = ['0']
+            pattern_list = [pattern_list]
+
+        coerced_patterns = []
+        for pattern in pattern_list:
+            tensor = torch.as_tensor(pattern, device=self.device)
             if torch.is_complex(tensor):
                 tensor = torch.imag(tensor)
             tensor = tensor.to(dtype=self.dtype_f)
             if tensor.ndim == 0:
-                return torch.ones((Nx, Ny), dtype=self.dtype_f, device=self.device) * tensor
+                tensor = torch.ones((Nx, Ny), dtype=self.dtype_f, device=self.device) * tensor
             if tensor.shape != (Nx, Ny):
                 raise ValueError(f'Absorption pattern must have shape ({Nx}, {Ny})')
-            return tensor
+            coerced_patterns.append(tensor)
 
-        patterns = {}
-        if isinstance(eps_imag, dict):
-            for name, pattern in eps_imag.items():
-                if isinstance(pattern, (list, tuple)):
-                    if len(pattern) != 3:
-                        raise ValueError('Absorption pattern must be isotropic or a length-3 diagonal tuple/list')
-                    patterns[str(name)] = tuple(to_grid(component) for component in pattern)
-                else:
-                    grid = to_grid(pattern)
-                    patterns[str(name)] = (grid, grid, grid)
-        elif isinstance(eps_imag, (list, tuple)):
-            if len(eps_imag) != 3:
-                raise ValueError('Absorption pattern must be isotropic or a length-3 diagonal tuple/list')
-            patterns['default'] = tuple(to_grid(component) for component in eps_imag)
+        thickness = torch.as_tensor(self.thickness_list[which_layer], dtype=self.dtype_f, device=self.device)
+        z_min = max(int(z_min), 2)
+        if z_step is None:
+            z_coords = torch.linspace(0.0, thickness, z_min, dtype=self.dtype_f, device=self.device)
         else:
-            grid = to_grid(eps_imag)
-            patterns['default'] = (grid, grid, grid)
+            z_step = torch.as_tensor(z_step, dtype=self.dtype_f, device=self.device)
+            z_offset = torch.as_tensor(z_offset, dtype=self.dtype_f, device=self.device)
+            if z_step.item() <= 0.0:
+                raise ValueError('z_step must be positive')
 
-        z_count = max(int(min_znum), 2)
-        z_coords = build_layer_z_points(self, self.thickness_list[which_layer], count=z_count, z_step=z_step)
+            if thickness.item() == 0.0:
+                z_coords = torch.zeros((z_min,), dtype=self.dtype_f, device=self.device)
+            else:
+                z_coords = z_offset + torch.arange(
+                    0,
+                    thickness.item() + z_step.item(),
+                    z_step.item(),
+                    dtype=self.dtype_f,
+                    device=self.device,
+                )
+                z_coords = z_coords[(z_coords >= 0.0) & (z_coords <= thickness)]
+
+                zero = torch.zeros((), dtype=self.dtype_f, device=self.device)
+                if z_coords.numel() == 0 or not torch.isclose(z_coords[0], zero):
+                    z_coords = torch.concatenate((zero.reshape(1), z_coords))
+                if not torch.isclose(z_coords[-1], thickness):
+                    z_coords = torch.concatenate((z_coords, thickness.reshape(1)))
+                if z_coords.numel() < z_min:
+                    z_coords = torch.linspace(0.0, thickness, z_min, dtype=self.dtype_f, device=self.device)
+
         E, _ = self.Solve_FieldXY(which_layer, z_coords, Nxy=(Nx, Ny), components=('Ex', 'Ey', 'Ez'))
         ex, ey, ez = E
+        e2 = torch.abs(ex) ** 2 + torch.abs(ey) ** 2 + torch.abs(ez) ** 2
         omega_real = torch.real(self.omega).to(dtype=self.dtype_f)
-        densities = {}
+
+        pattern_density = []
         total_density = torch.zeros((z_coords.numel(), Nx, Ny), dtype=self.dtype_f, device=self.device)
-        for name, (loss_x, loss_y, loss_z) in patterns.items():
-            density = 0.5 * omega_real * (
-                loss_x.unsqueeze(0) * torch.abs(ex) ** 2
-                + loss_y.unsqueeze(0) * torch.abs(ey) ** 2
-                + loss_z.unsqueeze(0) * torch.abs(ez) ** 2
-            )
+        for pattern in coerced_patterns:
+            density = omega_real * pattern.unsqueeze(0) * e2
             density = torch.real(density)
-            densities[name] = density
+            pattern_density.append(density)
             total_density = total_density + density
 
         cell_area = torch.abs(self.L1[0] * self.L2[1] - self.L1[1] * self.L2[0]) * self.Pscale ** 2
         dA = cell_area / (Nx * Ny)
-        return z_coords, densities, total_density, dA, Nx, Ny
 
-    def Solve_AbsorptionLayer(self, which_layer, eps_imag, min_znum=2, z_step=None, Nxy=None, normalize=0):
-        return self.Solve_AbsorptionLayerZ(
-            which_layer,
-            eps_imag,
-            min_znum=min_znum,
-            z_step=z_step,
-            Nxy=Nxy,
-            normalize=normalize,
-        )['total']
-
-    def Solve_AbsorptionLayerZ(self, which_layer, eps_imag, min_znum=2, z_step=None, Nxy=None, normalize=0):
-        z_coords, densities, total_density, dA, Nx, Ny = self._solve_absorption_density(
-            which_layer,
-            eps_imag,
-            min_znum=min_znum,
-            z_step=z_step,
-            Nxy=Nxy,
-        )
-
-        absorption_z = dA * torch.sum(total_density, dim=(-2, -1))
-        total = torch.trapz(absorption_z, z_coords)
-
-        per_pattern = {}
-        for name, density in densities.items():
-            pattern_z = dA * torch.sum(density, dim=(-2, -1))
-            pattern_total = torch.trapz(pattern_z, z_coords)
-            if normalize == 1:
-                pattern_z = pattern_z * self.normalization
-                pattern_total = pattern_total * self.normalization
-            per_pattern[name] = {
-                'total': torch.real(pattern_total),
-                'absorption_z': torch.real(pattern_z),
-            }
-
-        if normalize == 1:
-            absorption_z = absorption_z * self.normalization
-            total = total * self.normalization
-
-        return {
-            'total': torch.real(total),
-            'z_coords': z_coords,
-            'absorption_z': torch.real(absorption_z),
-            'per_pattern': per_pattern,
-            'Nx': Nx,
-            'Ny': Ny,
-        }
-
-    def Solve_AbsorptionLayerXY(self, which_layer, eps_imag, min_znum=2, z_step=None, Nxy=None, normalize=0):
-        z_coords, densities, total_density, dA, Nx, Ny = self._solve_absorption_density(
-            which_layer,
-            eps_imag,
-            min_znum=min_znum,
-            z_step=z_step,
-            Nxy=Nxy,
-        )
-
-        absorption_xy = torch.trapz(total_density, z_coords, dim=0)
-        total = dA * torch.sum(absorption_xy)
-
-        per_pattern = {}
-        for name, density in densities.items():
-            pattern_xy = torch.trapz(density, z_coords, dim=0)
-            pattern_total = dA * torch.sum(pattern_xy)
-            if normalize == 1:
-                pattern_xy = pattern_xy * self.normalization
-                pattern_total = pattern_total * self.normalization
-            per_pattern[name] = {
-                'total': torch.real(pattern_total),
-                'absorption_xy': torch.real(pattern_xy),
-            }
-
-        if normalize == 1:
-            absorption_xy = absorption_xy * self.normalization
-            total = total * self.normalization
-
-        return {
-            'total': torch.real(total),
-            'absorption_xy': torch.real(absorption_xy),
-            'per_pattern': per_pattern,
-            'Nx': Nx,
-            'Ny': Ny,
-        }
-
-    def Solve_Absorption(self, eps_imag_layers, min_znum=2, z_step=None, Nxy=None, normalize=0):
-        if isinstance(eps_imag_layers, dict):
-            items = sorted(eps_imag_layers.items())
+        if avg is None:
+            absorption = total_density
+            pattern_absorption = pattern_density
+            pattern_total = [torch.trapz(dA * torch.sum(density, dim=(-2, -1)), z_coords) for density in pattern_density]
+            total = torch.trapz(dA * torch.sum(total_density, dim=(-2, -1)), z_coords)
+        elif avg == 'xy':
+            absorption = dA * torch.sum(total_density, dim=(-2, -1))
+            pattern_absorption = [dA * torch.sum(density, dim=(-2, -1)) for density in pattern_density]
+            pattern_total = [torch.trapz(density, z_coords) for density in pattern_absorption]
+            total = torch.trapz(absorption, z_coords)
+        elif avg == 'z':
+            absorption = torch.trapz(total_density, z_coords, dim=0)
+            pattern_absorption = [torch.trapz(density, z_coords, dim=0) for density in pattern_density]
+            pattern_total = [dA * torch.sum(density) for density in pattern_absorption]
+            total = dA * torch.sum(absorption)
+        elif avg in ('tot', 'total'):
+            pattern_absorption = [torch.trapz(dA * torch.sum(density, dim=(-2, -1)), z_coords) for density in pattern_density]
+            pattern_total = pattern_absorption
+            total = torch.trapz(dA * torch.sum(total_density, dim=(-2, -1)), z_coords)
+            absorption = total
         else:
-            if len(eps_imag_layers) != self.Layer_N:
-                raise ValueError('Absorption layer sequence must have one entry per layer')
-            items = [(layer_index, eps_imag) for layer_index, eps_imag in enumerate(eps_imag_layers)]
+            raise ValueError("avg must be None, 'XY', 'Z', or 'tot'")
 
-        per_layer = {}
+        if normalize == 1:
+            incident_power = self._incident_power()
+            absorption = absorption / incident_power
+            pattern_absorption = [density / incident_power for density in pattern_absorption]
+            pattern_total = [value / incident_power for value in pattern_total]
+            total = total / incident_power
+
+        return {
+            'which_layer': which_layer,
+            'avg': avg,
+            'z_coords': z_coords,
+            'absorption': torch.real(absorption),
+            'pattern_absorption': [torch.real(density) for density in pattern_absorption],
+            'pattern_total': [torch.real(value) for value in pattern_total],
+            'pattern_names': pattern_names,
+            'total': torch.real(total),
+            'Nx': Nx,
+            'Ny': Ny,
+        }
+
+    def Solve_Absorption(self, layer_list, pattern_list=None, z_step=None, z_offset=0.0, z_min=2, Nxy=None, avg=None, normalize=0, min_znum=None):
+        if min_znum is not None:
+            z_min = min_znum
+
+        legacy_input = False
+        if pattern_list is None:
+            if isinstance(layer_list, dict):
+                legacy_input = True
+                items = sorted(layer_list.items())
+                layer_list = [item[0] for item in items]
+                pattern_list = [item[1] for item in items]
+            else:
+                raise ValueError('pattern_list is required unless layer_list is a dict of layer -> patterns')
+
+        if len(layer_list) != len(pattern_list):
+            raise ValueError('layer_list and pattern_list must have the same length')
+
+        per_layer = []
+        per_layer_dict = {}
+        layer_total = []
         total = torch.zeros((), dtype=self.dtype_f, device=self.device)
-        for layer_index, eps_imag in items:
-            if eps_imag is None:
-                continue
-            layer_value = self.Solve_AbsorptionLayer(
-                layer_index,
-                eps_imag,
-                min_znum=min_znum,
+
+        for i, which_layer in enumerate(layer_list):
+            layer_nxy = Nxy
+            if isinstance(Nxy, dict):
+                layer_nxy = Nxy.get(int(which_layer))
+            elif isinstance(Nxy, (list, tuple)) and len(Nxy) == len(layer_list) and not isinstance(Nxy[0], numbers.Number):
+                layer_nxy = Nxy[i]
+
+            result = self.Solve_AbsorptionLayer(
+                which_layer,
+                pattern_list[i],
                 z_step=z_step,
-                Nxy=Nxy,
+                z_offset=z_offset,
+                z_min=z_min,
+                Nxy=layer_nxy,
+                avg=avg,
                 normalize=normalize,
             )
-            per_layer[int(layer_index)] = layer_value
-            total = total + layer_value
+            per_layer.append(result)
+            per_layer_dict[int(which_layer)] = result['total']
+            layer_total.append(result['total'])
+            total = total + result['total']
+
+        if legacy_input:
+            return {
+                'total': total,
+                'per_layer': per_layer_dict,
+                'per_layer_detail': per_layer,
+            }
 
         return {
-            'total': total,
+            'layer_list': [int(layer) for layer in layer_list],
             'per_layer': per_layer,
+            'layer_total': layer_total,
+            'total': total,
         }
 
     def Volume_integral(self, which_layer, Mx, My, Mz, normalize=0):
@@ -1182,7 +1228,7 @@ class obj:
         val = torch.trace(torch.matmul(abM, tmp))
 
         if normalize == 1:
-            val = val * self.normalization
+            val = val / self._incident_power()
         return val
 
     def Solve_ZStressTensorIntegral(self, which_layer):

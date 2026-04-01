@@ -1,6 +1,6 @@
 # Update Log
 
-Date: 2026-03-29
+Date: 2026-04-01
 
 ## 1. Torch-only migration baseline
 
@@ -130,8 +130,6 @@ Real-space absorption helpers were added and intentionally left simple so they a
 Added:
 
 - `Solve_AbsorptionLayer(...)`
-- `Solve_AbsorptionLayerZ(...)`
-- `Solve_AbsorptionLayerXY(...)`
 - `Solve_Absorption(...)`
 
 Supported inputs:
@@ -142,6 +140,18 @@ Supported inputs:
 - multiple layers via dict or layer-aligned sequence
 
 The current implementation evaluates absorption from real-space `FieldXY(...)` samples.
+
+It now uses a simpler main API:
+
+- `Solve_AbsorptionLayer(which_layer, pattern_list, z_step=..., z_offset=..., z_min=..., avg=None|'XY'|'Z'|'tot')`
+- `Solve_Absorption(layer_list, pattern_list, ...)`
+- `avg='tot'` for scalar integrated absorption only
+
+Normalization is now tied to the current excitation:
+
+- `normalize=1` divides by the actual incident power of the current excitation
+- `obj.normalization` stores that same incident-power value
+- this replaces the older fixed `n/cos(theta)`-style interpretation
 
 ### 2.8 Readability cleanup
 
@@ -157,6 +167,21 @@ Main points:
   simplifying the absorption input path
 - inlined S-matrix step construction where it is used so cache build/update is
   easier to follow when reading the source
+
+### 2.9 Root helper packages
+
+Two lightweight root-level helper packages were added outside `grcwa/`:
+
+- `patterns/`
+  - reusable geometry and epsilon-pattern builders
+  - centered-grid construction and flatten helpers for `GridLayer_geteps(...)`
+- `materials/`
+  - `material(lamb0, ...)` as the main entry point
+  - dynamic access such as `mat.eps_SiO2_xx()`
+  - automatic latest-file selection such as `SiO2_index_260401.txt`
+  - optional `filename='SiO2_index.txt'` override
+  - linear interpolation / end-segment extrapolation of `n` and `k`, then
+    `eps = (n + i k)^2`
 
 ## 3. Examples and tests added
 
@@ -196,7 +221,7 @@ Tests were added for:
 Current local test result:
 
 - `python -m pytest -q`
-- `24 passed`
+- `39 passed`
 
 ## 4. Current benchmark summary
 
@@ -210,25 +235,31 @@ Representative case:
 
 Measured on the current workstation:
 
-- `RT_Solve()`:
-  - current: about `0.14s`
-  - `v0.2.0`: about `0.17s`
-  - about `1.2x` faster
+- `RT_Solve()` with `normalize=0`:
+  - current: about `0.11s`
+  - `v0.2.0`: about `0.25s`
+  - about `2.4x` faster
 
 - all-layer `GetAmplitudes(...)`:
-  - current: about `0.022s`
-  - `v0.2.0`: about `1.58s`
-  - about `73.4x` faster
+  - current: about `0.026s`
+  - `v0.2.0`: about `2.10s`
+  - about `82.1x` faster
 
 - `Solve_FieldOnGrid(...)`:
-  - current: about `0.0039s`
-  - `v0.2.0`: about `0.235s`
-  - about `59.8x` faster
+  - current: about `0.0059s`
+  - `v0.2.0`: about `0.262s`
+  - about `44.5x` faster
 
-Numerical agreement stayed very tight:
+Numerical agreement stayed very tight for the shared raw quantities:
 
-- `|R diff|`, `|T diff|` around `1e-15`
+- raw `|R diff|`, `|T diff|` around `1e-15`
 - field differences around `1e-14`
+
+Note:
+
+- normalized `RT_Solve(normalize=1)` is no longer directly comparable to
+  `v0.2.0`, because the current code now normalizes with the actual current
+  incident power rather than the older fixed factor.
 
 ### 4.2 Larger current-only scaling cases
 
@@ -241,11 +272,11 @@ Case B:
 Measured:
 
 - `BuildSMatrixCache`: about `1.47s`
-- `RT uncached -> cached`: about `37.1x`
-- `BuildAmplitudeCache`: about `0.057s`
-- `Amplitude uncached -> cached lookup`: about `3215.8x`
-- `FieldXY`: about `0.0058s`
-- `FieldXZ`: about `0.0300s`
+- `RT uncached -> cached`: about `48.6x`
+- `BuildAmplitudeCache`: about `0.086s`
+- `Amplitude uncached -> cached lookup`: about `2699.8x`
+- `FieldXY`: about `0.0029s`
+- `FieldXZ`: about `0.0376s`
 - `S-matrix cache`: about `89.9 MB`
 - `amplitude + exterior cache`: about `0.10 MB`
 
@@ -257,12 +288,12 @@ Case C:
 
 Measured:
 
-- `BuildSMatrixCache`: about `3.57s`
-- `RT uncached -> cached`: about `53.1x`
-- `BuildAmplitudeCache`: about `0.146s`
-- `Amplitude uncached -> cached lookup`: about `8393.6x`
-- `FieldXY`: about `0.0073s`
-- `FieldXZ`: about `0.0471s`
+- `BuildSMatrixCache`: about `3.50s`
+- `RT uncached -> cached`: about `58.0x`
+- `BuildAmplitudeCache`: about `0.320s`
+- `Amplitude uncached -> cached lookup`: about `4718.2x`
+- `FieldXY`: about `0.0041s`
+- `FieldXZ`: about `0.0457s`
 - `S-matrix cache`: about `209.9 MB`
 - `amplitude + exterior cache`: about `0.17 MB`
 

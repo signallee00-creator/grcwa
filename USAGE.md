@@ -35,6 +35,11 @@ ai, bi = obj.GetAmplitudes(which_layer, z_offset)
 E, H = obj.Solve_FieldOnGrid(which_layer, z_offset)
 ```
 
+`normalize=1` uses the actual incident flux of the current excitation, so the
+result is stable even if the incident amplitudes are rescaled or the entrance
+medium has loss.
+`obj.normalization` stores this same incident-power value.
+
 ## Cache Workflow
 
 ```python
@@ -113,6 +118,84 @@ obj.SaveState('baseline_light.pt', include_caches=True)
 ```
 
 This keeps the small amplitude/exterior caches without saving the heavy prefix/suffix S-matrix sweep.
+
+## Absorption
+
+```python
+abs_3d = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2], z_step=0.01, z_offset=0.0, z_min=5)
+abs_z = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2], z_step=0.01, z_offset=0.0, z_min=5, avg='XY')
+abs_xy = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2], z_step=0.01, z_offset=0.0, z_min=5, avg='Z')
+layer_list = [1, 3]
+pattern_list = [
+    [layer1_imag_eps_a, layer1_imag_eps_b],  # patterns for layer 1
+    [layer3_imag_eps_a],                     # patterns for layer 3
+]
+abs_all = obj.Solve_Absorption(layer_list, pattern_list, z_step=0.01, z_min=5, avg='XY')
+abs_tot = obj.Solve_AbsorptionLayer(which_layer, [imag_eps_grid1, imag_eps_grid2], z_step=0.01, z_offset=0.0, z_min=5, avg='tot')
+```
+
+Notes:
+
+- `Solve_AbsorptionLayer()` is now the main API
+- `avg=None` keeps the full `(Nz, Nx, Ny)` absorption density
+- `avg='XY'` compresses `x,y` and returns a `z` profile
+- `avg='Z'` compresses `z` and returns an `x,y` map
+- `avg='tot'` returns only the integrated scalar absorption
+- `pattern_absorption` and `pattern_total` follow the order of the input pattern list
+- in `Solve_Absorption(layer_list, pattern_list, ...)`, the outer list follows `layer_list` order, so each layer can use a different grid shape
+
+## patterns and materials
+
+Use `patterns/` to build epsilon grids for `GridLayer_geteps(...)`:
+
+```python
+from patterns import pattern_xx, nm
+import torch
+
+pat = pattern_xx(
+    size_x=400 * nm,
+    size_y=400 * nm,
+    Nx=128,
+    Ny=128,
+    lamb0=1550 * nm,
+    CRA=0.0,
+    azimuth=0.0,
+    eps_bg=1.0,
+    eps_obj=3.48**2,
+    radius=90 * nm,
+    dtype_f=torch.float64,
+    dtype_c=torch.complex128,
+    device='cpu',
+)
+
+obj.GridLayer_geteps(pat.flatten())
+obj.GridLayer_geteps(torch.cat([pat1.flatten(), pat2.flatten()]))
+```
+
+Use `materials/` to read `WL n k` decks:
+
+```python
+from materials import material
+import torch
+
+mat = material(
+    1550e-9,
+    dtype_f=torch.float64,
+    dtype_c=torch.complex128,
+    device='cpu',
+)
+
+eps_sio2 = mat.eps_SiO2_xx()
+eps_old = mat.eps_SiO2_xx(filename='SiO2_index.txt')
+```
+
+Rules:
+
+- `WL` is interpreted in `nm`
+- query wavelengths are interpreted in `m`
+- `n` and `k` use linear interpolation with end-segment extrapolation
+- `eps = (n + i k)^2`
+- if both `SiO2_index.txt` and `SiO2_index_260401.txt` exist, the latest dated file is used by default
 
 ## Benchmarks and Examples
 

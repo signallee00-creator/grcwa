@@ -1,6 +1,6 @@
 # 업데이트 로그
 
-날짜: 2026-03-29
+날짜: 2026-04-01
 
 ## 1. torch-only 전환
 
@@ -110,7 +110,18 @@ obj.ClearSMatrixCache()
 - field 계산용 가벼운 cached state 저장:
   `BuildAmplitudeCache()` 후 `ClearSMatrixCache()` 하고 `include_caches=True`
 
-### 2.7 가독성 정리
+### 2.7 흡수 / 정규화
+
+- `Solve_AbsorptionLayer(...)`
+- `Solve_Absorption(...)`
+
+현재 정규화는 excitation 기준으로 맞춥니다.
+
+- `normalize=1`은 현재 excitation의 실제 incident power로 나눔
+- `obj.normalization`도 같은 incident-power 값을 가리킴
+- 예전의 고정 `n/cos(theta)` 해석은 더 이상 쓰지 않음
+
+### 2.8 가독성 정리
 
 코드를 예전 `rcwa.py`를 읽던 흐름에 더 가깝게 다시 정리했습니다.
 
@@ -122,6 +133,20 @@ obj.ClearSMatrixCache()
   함수 수를 줄임
 - cache build/update에서 step S-matrix 생성 위치를 바로 보이게 해서
   소스만 읽어도 흐름을 따라가기 쉽게 정리
+
+### 2.9 루트 helper 패키지
+
+`grcwa/` 바깥 루트에 가벼운 helper 패키지 2개를 추가했습니다.
+
+- `patterns/`
+  - 재사용 가능한 geometry / epsilon pattern 생성
+  - centered grid와 `GridLayer_geteps(...)`용 flatten helper 제공
+- `materials/`
+  - `material(lamb0, ...)`를 기본 진입점으로 사용
+  - `mat.eps_SiO2_xx()` 같은 방식으로 접근 가능
+  - `SiO2_index_260401.txt` 같은 최신 파일 자동 선택
+  - `filename='SiO2_index.txt'`처럼 특정 파일 지정 가능
+  - `n`, `k`를 선형 보간/끝점 외삽한 뒤 `eps = (n + i k)^2`로 계산
 
 ## 3. 벤치 요약
 
@@ -135,9 +160,14 @@ obj.ClearSMatrixCache()
 
 대략:
 
-- `RT_Solve()`: `1.2x` faster
-- all-layer amplitudes: `73.4x` faster
-- `Solve_FieldOnGrid()`: `59.8x` faster
+- `RT_Solve(normalize=0)`: `2.4x` faster
+- all-layer amplitudes: `82.1x` faster
+- `Solve_FieldOnGrid()`: `44.5x` faster
+
+주의:
+
+- 현재 `normalize=1`은 실제 incident power 기준이라서
+  예전 `v0.2.0`의 정규화된 `RT`와는 직접 수치 비교하면 안 됨
 
 ### larger current-only cases
 
@@ -146,9 +176,9 @@ Case B:
 - layers: `13`
 - actual `nG`: `119`
 - grid: `64 x 64`
-- `BuildSMatrixCache`: about `1.47s`
+- `BuildSMatrixCache`: about `1.60s`
 - `S-matrix cache`: about `89.9 MB`
-- `BuildAmplitudeCache`: about `0.057s`
+- `BuildAmplitudeCache`: about `0.086s`
 - `amplitude + exterior cache`: about `0.10 MB`
 
 Case C:
@@ -156,9 +186,9 @@ Case C:
 - layers: `17`
 - actual `nG`: `159`
 - grid: `72 x 72`
-- `BuildSMatrixCache`: about `3.57s`
+- `BuildSMatrixCache`: about `3.50s`
 - `S-matrix cache`: about `209.9 MB`
-- `BuildAmplitudeCache`: about `0.146s`
+- `BuildAmplitudeCache`: about `0.320s`
 - `amplitude + exterior cache`: about `0.17 MB`
 
 핵심 해석:
@@ -170,7 +200,7 @@ Case C:
 ## 4. 테스트 상태
 
 - `python -m pytest -q`
-- 현재 `24 passed`
+- 현재 `39 passed`
 
 ## 5. 관련 파일
 

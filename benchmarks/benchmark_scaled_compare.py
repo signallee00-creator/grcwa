@@ -133,8 +133,8 @@ def compare_shared_apis_against_tag():
     layer_index = 3
     z_list = [0.0, float(current.thickness_list[layer_index]) * 0.5]
 
-    rt_current, (R_current, T_current) = bench(lambda: current.RT_Solve(normalize=1))
-    rt_baseline, (R_baseline, T_baseline) = bench(lambda: baseline.RT_Solve(normalize=1))
+    rt_current, (R_current, T_current) = bench(lambda: current.RT_Solve(normalize=0))
+    rt_baseline, (R_baseline, T_baseline) = bench(lambda: baseline.RT_Solve(normalize=0))
 
     amp_current, current_amp = bench(lambda: [current.GetAmplitudes(layer, 0.0) for layer in range(current.Layer_N)])
     amp_baseline, baseline_amp = bench(lambda: [baseline.GetAmplitudes(layer, 0.0) for layer in range(baseline.Layer_N)])
@@ -144,6 +144,7 @@ def compare_shared_apis_against_tag():
 
     print('Case A: current worktree vs git tag v0.2.0')
     print(f"  layers = {current.Layer_N}, nG = {current.nG}, grid = {case['nx']}x{case['ny']}")
+    print("  RT comparison uses normalize=0 because normalize=1 now uses the current incident power.")
     print(f"  RT current  = {rt_current:.4f}s")
     print(f"  RT v0.2.0   = {rt_baseline:.4f}s")
     print(f"  RT speedup  = {rt_baseline / rt_current:.1f}x")
